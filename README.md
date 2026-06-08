@@ -30,3 +30,4 @@ Debian/Ubuntu/Debian-based Linux: /home/<your-user-here>/.steam/debian-installat
 - Anything in the Reactor Control and Maintenance tabs currently MAY/DO NOT WORK, AND COULD EVEN DESTROY YOUR REACTOR. USE THESE AT YOUR OWN RISK. Please report your experience and maybe even share your original and modded save games along with your Player.log in a Github Issue on this repo. This will help us improve the save game modder tool.
 ---
 Feel free to help us by making Github issues and pull requests!
+If anything happens with the tool itself, please copy the Console Output from the window and provide it when submitting your issue, along with your input (and output if it exists) files. If this was an issue that occurred in-game after loading a modded save, provide the Player.log file as well as the save and a recording if possible.
