@@ -31,3 +31,4 @@ Debian/Ubuntu/Debian-based Linux: /home/<your-user-here>/.steam/debian-installat
 ---
 Feel free to help us by making Github issues and pull requests!
 If anything happens with the tool itself, please copy the Console Output from the window and provide it when submitting your issue, along with your input (and output if it exists) files. If this was an issue that occurred in-game after loading a modded save, provide the Player.log file as well as the save and a recording if possible.
+If you want to help with figuring out the differences in different configurations of the reactor, you could provide saves with different amounts of pumps, upgrades, etc. Provide a before and after save of these. This will make it so we can maybe even add new things into saves rather than just modding the current save state, or even letting you build your own reactor at some point in the future!
