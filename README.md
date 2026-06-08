@@ -4,7 +4,7 @@ A complex save modder that exposes a simple GUI to modify Nucleares save files.
 # Requirements
 This script needs Python 3.11 or higher. It was tested on Python 3.14 Ubuntu 26.04 LTS with Nucleares V 2.2.25.217 running under Steam Proton.
 You need:
-- Pyhton 3.11 or higher
+- Python 3.11 or higher ([3.14.5 install](https://www.python.org/downloads/release/python-3145/))
 - Python Tkinter
 - All files in this repo
 
