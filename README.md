@@ -2,7 +2,7 @@
 A complex save modder that exposes a simple GUI to modify Nucleares save files.
 ---
 # Notice
-- This may or may not work above or below the tested versions.
+- This may or may not work above or below the tested versions. See [the tested and untested versions file.](tested_versions.md)
 - Please back up your saves before modding, as this has the potential to break your saves.
 - Reactor-related edits may or may not work, and could even destabilize or destroy the reactor if running.
 - Please let us know your results! This will help us to make this work better in the future.
