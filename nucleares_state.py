@@ -16,269 +16,347 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 '''
 import xml.etree.ElementTree as ET
+import html
 import copy
 from nucleares_io import decode_payload, encode_payload
+
+def _html_decode(text):
+    """HTML-unescape a component payload, then parse as XML."""
+    clean = html.unescape(text.strip())
+    if 'encoding="utf-16"' in clean:
+        clean = clean.replace('encoding="utf-16"', 'encoding="utf-8"')
+    return ET.fromstring(clean)
+
 
 class SaveMemoryManager:
     def __init__(self, master_tree, master_root):
         self.master_tree = master_tree
         self.master_root = master_root
-        
+
         self.state = {
-            "player": {},         
-            "components": {},     
-            "networks": [],       
-            "objects": []         
+            "player": {},
+            "components": {},
+            "fluid_network": None,   # Single decoded DIF element (mutable in-place)
+            "fluid_network_node": None,  # The raw master XML node for write-back
+            "objects": []
         }
-        
+
         self._parse_into_memory()
 
+    # ------------------------------------------------------------------
+    # PARSING
+    # ------------------------------------------------------------------
+
     def _parse_into_memory(self):
-        """Scans the save file and safely builds the abstract map, checking for hidden payloads."""
-        
-        # 1. Map Player Data
+        """Builds the abstract in-memory state from the master XML tree."""
+
+        # 1. Player nodes (HTML-encoded XML blobs)
         for tag in ["JUGADOR", "LOGROS_MLIBRE"]:
             node = self.master_root.find(f".//{tag}")
             if node is not None and node.text:
-                self.state["player"][tag] = decode_payload(node.text)
+                self.state["player"][tag] = _html_decode(node.text)
 
-        # 2. Map Reactor Components (Dynamic Check for Inception Payloads)
+        # 2. Reactor components (also HTML-encoded XML blobs inside <componentes>)
         comps_node = self.master_root.find(".//componentes")
         if comps_node is not None:
             for comp in comps_node:
-                if comp.text and "<?xml" in comp.text:
+                if comp.text and ("<?xml" in comp.text or "&lt;" in comp.text):
+                    # HTML-encoded XML payload
                     self.state["components"][comp.tag] = {
                         "type": "encoded",
                         "master_element": comp,
-                        "inner_xml": decode_payload(comp.text)
+                        "inner_xml": _html_decode(comp.text),
                     }
                 else:
                     self.state["components"][comp.tag] = {
                         "type": "direct",
                         "master_element": comp,
-                        "inner_xml": comp
+                        "inner_xml": comp,
                     }
 
-        # 3. Map Fluid Networks (Dynamic Check)
-        for net in self.master_root.findall(".//NODE_NETWORKS"):
-            if net.text and "<?xml" in net.text:
-                self.state["networks"].append({
-                    "type": "encoded",
-                    "master_element": net,
-                    "inner_xml": decode_payload(net.text)
-                })
-            else:
-                self.state["networks"].append({
-                    "type": "direct",
-                    "master_element": net,
-                    "inner_xml": net
-                })
+        # 3. Fluid network — lives in <DISTRIBUCION_INTERNA_FLUIDOS>, NOT <NODE_NETWORKS>
+        dif_node = self.master_root.find(".//DISTRIBUCION_INTERNA_FLUIDOS")
+        if dif_node is not None and dif_node.text:
+            self.state["fluid_network_node"] = dif_node
+            self.state["fluid_network"] = _html_decode(dif_node.text)
 
-        # 4. Map Objects (Pipe-separated Strings)
+        # 4. Objects — pipe-separated strings; only those whose LAST segment is an
+        #    XML payload are mapped.  Non-XML objects are silently skipped (they
+        #    carry no repairable state).
         obj_node = self.master_root.find(".//objetos")
         if obj_node is not None:
             for obj in obj_node:
-                if obj.text and "|" in obj.text:
-                    parts = obj.text.split("|")
-                    if len(parts) >= 4:
-                        try:
-                            inner_xml = decode_payload(parts[-1])
-                            self.state["objects"].append({
-                                "master_element": obj,
-                                "parts_prefix": parts[:-1],
-                                "inner_xml": inner_xml
-                            })
-                        except ValueError:
-                            continue
+                if not (obj.text and "|" in obj.text):
+                    continue
+                parts = obj.text.split("|")
+                # The XML payload, when present, is always the last segment
+                last = parts[-1]
+                if "<?xml" not in last and "&lt;" not in last:
+                    continue
+                try:
+                    inner_xml = _html_decode(last)
+                    self.state["objects"].append({
+                        "master_element": obj,
+                        "parts_prefix": parts[:-1],
+                        "inner_xml": inner_xml,
+                    })
+                except (ValueError, ET.ParseError):
+                    continue
+
+    # ------------------------------------------------------------------
+    # COMMIT
+    # ------------------------------------------------------------------
 
     def commit_to_xml(self):
-        """Maps the abstracted in-memory state back onto the master XML tree."""
+        """Writes the in-memory state back onto the master XML tree."""
+
+        # Player
         for tag, inner_element in self.state["player"].items():
             node = self.master_root.find(f".//{tag}")
             if node is not None:
                 node.text = encode_payload(inner_element)
-                
+
+        # Components
         for tag, comp_data in self.state["components"].items():
             if comp_data["type"] == "encoded":
                 comp_data["master_element"].text = encode_payload(comp_data["inner_xml"])
-                
-        for net_data in self.state["networks"]:
-            if net_data["type"] == "encoded":
-                net_data["master_element"].text = encode_payload(net_data["inner_xml"])
 
+        # Fluid network
+        dif_node = self.state["fluid_network_node"]
+        dif = self.state["fluid_network"]
+        if dif_node is not None and dif is not None:
+            dif_node.text = encode_payload(dif)
+
+        # Objects
         for obj_data in self.state["objects"]:
             encoded_xml = encode_payload(obj_data["inner_xml"])
             full_string = "|".join(obj_data["parts_prefix"] + [encoded_xml])
             obj_data["master_element"].text = full_string
 
-    # ==========================================
-    # UTILITIES & GETTERS
-    # ==========================================
+    # ------------------------------------------------------------------
+    # UTILITIES
+    # ------------------------------------------------------------------
+
     def get_manual_map(self):
         mapping = {}
         for tag, elem in self.state["player"].items():
             mapping[f"[Player] {tag}"] = elem
         for tag, comp_data in self.state["components"].items():
             mapping[f"[Component] {tag}"] = comp_data["inner_xml"]
-        for i, net_data in enumerate(self.state["networks"]):
-            net = net_data["inner_xml"]
-            name_node = net.find(".//Name")
-            n = name_node.text if name_node is not None else f"Network_Index_{i}"
-            mapping[f"[Fluid] {n}"] = net
+        # Fluid network exposed as a single entry
+        dif = self.state["fluid_network"]
+        if dif is not None:
+            mapping["[Fluid] DISTRIBUCION_INTERNA_FLUIDOS"] = dif
         for obj in self.state["objects"]:
-            obj_id = obj["parts_prefix"][0]
+            obj_id = obj["parts_prefix"][0] if obj["parts_prefix"] else "unknown"
             mapping[f"[Object] {obj_id}"] = obj["inner_xml"]
         return mapping
 
     def _set_dict_value(self, root_element, dict_name, key_name, new_value, value_tag):
         dict_element = root_element.find(f".//{dict_name}")
-        if dict_element is None: return False
+        if dict_element is None:
+            return False
         children = list(dict_element)
         for i in range(len(children) - 1):
             if children[i].tag == "string" and children[i].text == key_name:
-                if children[i+1].tag == value_tag:
-                    children[i+1].text = str(new_value)
+                if children[i + 1].tag == value_tag:
+                    children[i + 1].text = str(new_value)
                     return True
         return False
 
-    # ==========================================
+    # ------------------------------------------------------------------
     # MODIFICATION LOGIC (CHEATS)
-    # ==========================================
+    # ------------------------------------------------------------------
+
     def set_simple_stats(self, money, exp, level):
-        # Apply strict caps to safe thresholds to keep user interface clear and prevent serialization faults
-        money = min(max(float(money if money else 0), 0.0), 1000000000.0)
-        exp = min(max(float(exp if exp else 0), 0.0), 1000000000.0)
-        level = min(max(int(level if level else 1), 1), 100)
-        
+        money = min(max(float(money if money else 0), 0.0), 1_000_000_000.0)
+        exp   = min(max(float(exp   if exp   else 0), 0.0), 1_000_000_000.0)
+        level = min(max(int  (level if level else 1), 1), 100)
+
         logros = self.state["player"].get("LOGROS_MLIBRE")
         if logros is not None:
-            for tag, val in [("Puntos", money), ("NuevoPuntos", money), ("Experiencia", exp), ("Nivel", level)]:
+            for tag, val in [("Puntos", money), ("NuevoPuntos", money),
+                             ("Experiencia", exp), ("Nivel", level)]:
                 elem = logros.find(f".//{tag}")
                 if elem is not None:
                     elem.text = str(val)
                 else:
-                    elem = ET.SubElement(logros, tag)
-                    elem.text = str(val)
-                    
+                    ET.SubElement(logros, tag).text = str(val)
+
         jugador = self.state["player"].get("JUGADOR")
         if jugador is not None:
-            self._set_dict_value(jugador, "_valoresFloat", "dinero", money, "float")
-            self._set_dict_value(jugador, "_valoresFloat", "experiencia", exp, "float")
-            self._set_dict_value(jugador, "_valoresFloat", "nivel", float(level), "float")
-            
-        return f"Stats Applied safely: Money={money:,.0f}, Level={level}, EXP={exp:,.0f}"
+            self._set_dict_value(jugador, "_valoresFloat", "dinero",     money,         "float")
+            self._set_dict_value(jugador, "_valoresFloat", "experiencia", exp,           "float")
+            self._set_dict_value(jugador, "_valoresFloat", "nivel",       float(level),  "float")
+
+        return f"Stats Applied: Money={money:,.0f}, Level={level}, EXP={exp:,.0f}"
 
     def repair_all_objects(self):
         count = 0
-        
-        # 1. Repair Pipeline Objects
+
+        # 1. Objects with XML payloads (fuel rods, pumps, valves, etc.)
         for obj in self.state["objects"]:
             inner = obj["inner_xml"]
             repaired = False
-            
-            if self._set_dict_value(inner, "_valoresFloat", "porcentaje_roto", 0.0, "float"): repaired = True
-            if self._set_dict_value(inner, "_valoresFloat", "desgaste", 0.0, "float"): repaired = True
-            if self._set_dict_value(inner, "_valoresFloat", "temperatura", 20.0, "float"): repaired = True
-            
+            if self._set_dict_value(inner, "_valoresFloat", "porcentaje_roto", 0.0, "float"):
+                repaired = True
+            if self._set_dict_value(inner, "_valoresFloat", "desgaste", 0.0, "float"):
+                repaired = True
+            if self._set_dict_value(inner, "_valoresFloat", "temperatura", 20.0, "float"):
+                repaired = True
             for tag in ["Integridad"]:
                 elem = inner.find(f".//{tag}")
-                if elem is not None and elem.text != "100.0" and elem.text != "100":
+                if elem is not None and elem.text not in ("100.0", "100"):
                     elem.text = "100.0"
                     repaired = True
-            if repaired: count += 1
+            if repaired:
+                count += 1
 
-        # 2. Repair Major Systems
+        # 2. Major reactor sub-systems (components)
         for comp_name, comp_data in self.state["components"].items():
             inner = comp_data["inner_xml"]
             repaired = False
             for tag in ["Integridad", "IntegridadCalentadores", "IntegridadReliefTank"]:
-                elem = inner.find(f".//{tag}")
-                if elem is not None and elem.text != "100.0" and elem.text != "100":
+                for elem in inner.findall(f".//{tag}"):
+                    if elem.text not in ("100.0", "100"):
+                        elem.text = "100.0"
+                        repaired = True
+            for tag in ["RequiereMantenimiento", "IsContaminado",
+                        "DesactivadoPorFaltaDeSuministro", "RequiereMantenimientoCalentadores"]:
+                for elem in inner.findall(f".//{tag}"):
+                    if elem.text == "true":
+                        elem.text = "false"
+                        repaired = True
+            if repaired:
+                count += 1
+
+        # 3. Fluid-network pipes / containers
+        dif = self.state["fluid_network"]
+        if dif is not None:
+            for elem in dif.findall(".//Integridad"):
+                if elem.text not in ("100.0", "100"):
                     elem.text = "100.0"
-                    repaired = True
-            for tag in ["RequiereMantenimiento", "IsContaminado", "DesactivadoPorFaltaDeSuministro"]:
-                elem = inner.find(f".//{tag}")
-                if elem is not None and elem.text == "true":
-                    elem.text = "false"
-                    repaired = True
-            if repaired: count += 1
-            
+                    count += 1
+
         return f"Fully repaired {count} reactor objects and systems."
 
     def scrub_core_poisons(self):
         core_data = self.state["components"].get("NUCLEO")
-        if not core_data: return "Failed: Could not find <NUCLEO> in components."
+        if not core_data:
+            return "Failed: Could not find <NUCLEO> in components."
         core = core_data["inner_xml"]
-        
         modified = []
-        
-        # FLOAT VALUES (Require decimals)
-        for tag in ["XenonConcentracion", "YodoConcentracion", "ReactividadXenon", "ReactividadYodo"]:
+
+        for tag in ["XenonConcentracion", "YodoConcentracion",
+                    "ReactividadXenon",   "ReactividadYodo"]:
             elem = core.find(f".//{tag}")
             if elem is not None:
                 elem.text = "0.0"
                 modified.append(tag)
-                
-        # INTEGER VALUES (Crash C# if given decimals)
+
         for tag in ["_minutosAcumuladosEnvenenamientoXenon", "ContadorMasaCritica"]:
             elem = core.find(f".//{tag}")
             if elem is not None:
                 elem.text = "0"
                 modified.append(tag)
-            
-        # BOOLEAN VALUES (String false)
-        for tag in ["ExplosionInminente", "Flag_PerdioMasaCritica", "AlertaPorSituacionInsegura"]:
+
+        for tag in ["ExplosionInminente", "Flag_PerdioMasaCritica",
+                    "AlertaPorSituacionInsegura"]:
             elem = core.find(f".//{tag}")
             if elem is not None:
                 elem.text = "false"
                 modified.append(tag)
-        
-        return f"Core Scrubbed Safely. Modified attributes: {', '.join(modified) if modified else 'None'}"
+
+        return (f"Core Scrubbed. Modified: "
+                f"{', '.join(modified) if modified else 'None'}")
 
     def normalize_pressures(self):
+        """
+        Safely vent pressures.
+
+        PRESURIZADOR:
+          PresionFisicaBAR      → set to 160 (matches PresionOperativaBAR setpoint)
+          PresionMaxBAR         → left alone (hardware limit, not a runtime value)
+          TemperaturaFisicaMaxima → left alone (it's a hardware limit, not current temp)
+
+        EVAPORADOR:
+          PresionFisicaBAR      → set to 60 (safe secondary-side operating pressure)
+          TemperaturaFisicaMaxima → left alone (hardware limit)
+        """
         pres_data = self.state["components"].get("PRESURIZADOR")
         evap_data = self.state["components"].get("EVAPORADOR")
-        
+        msgs = []
+
         if pres_data:
             pres = pres_data["inner_xml"]
+            # Only touch the CURRENT physical pressure, never the max/limit fields
             elem = pres.find(".//PresionFisicaBAR")
-            if elem is not None: elem.text = "150.0"
-            elem = pres.find(".//TemperaturaFisicaMaxima")
-            if elem is not None: elem.text = "320.0"
-            
+            if elem is not None:
+                elem.text = "160.0"   # match PresionOperativaBAR so no sudden delta
+                msgs.append("Pressurizer → 160 BAR")
+
         if evap_data:
             evap = evap_data["inner_xml"]
             elem = evap.find(".//PresionFisicaBAR")
-            if elem is not None: elem.text = "70.0"
-            
-        return "Pressures Normalized: Pressurizer safely vented to 150 BAR."
+            if elem is not None:
+                elem.text = "60.0"
+                msgs.append("Steam generator → 60 BAR")
+
+        if not msgs:
+            return "normalize_pressures: no pressure elements found."
+        return "Pressures normalized: " + ", ".join(msgs) + "."
 
     def max_backup_generators(self):
         sum_data = self.state["components"].get("SUMINISTROINTERNO")
-        if not sum_data: return "Failed: Could not find <SUMINISTROINTERNO>."
+        if not sum_data:
+            return "Failed: Could not find <SUMINISTROINTERNO>."
         suministro = sum_data["inner_xml"]
-        
+
+        # CElectrogeno elements are nested anywhere under SUMINISTROINTERNO
         electros = suministro.findall(".//CElectrogeno")
         for e in electros:
             c = e.find(".//Combustible")
-            if c is not None: c.text = "99999.0"
-            i = e.find(".//IsContaminado")
-            if i is not None: i.text = "false"
-            m = e.find(".//RequiereMantenimiento")
-            if m is not None: m.text = "false"
-            
-        return f"Generators Secured: Refueled {len(electros)} backup diesel generators."
+            if c is not None:
+                c.text = "99999.0"
+            for tag in ["IsContaminado", "RequiereMantenimiento"]:
+                t = e.find(f".//{tag}")
+                if t is not None:
+                    t.text = "false"
+            # Repair integrity
+            i = e.find(".//Integridad")
+            if i is not None:
+                i.text = "100.0"
+
+        return (f"Generators Secured: Refueled {len(electros)} "
+                f"backup diesel generator(s).")
 
     def flood_reserves(self):
-        count = 0
-        for net_data in self.state["networks"]:
-            net = net_data["inner_xml"]
-            liquidos = net.findall(".//Liquido")
-            for liq in liquidos:
-                tipo = liq.find("Tipo")
-                if tipo is not None and tipo.text and tipo.text.strip() in ["AGUA", "BORO"]:
-                    cant = liq.find("Cantidad")
-                    if cant is not None: 
-                        cant.text = "500000.0"
-                        count += 1
-        return f"Fluids Flooded: Maxed out {count} Water and Boron fluid nodes."
+        """
+        Fill every AGUA and BORO Cantidad node in the fluid network.
+
+        The fluid network is a single encoded blob at DISTRIBUCION_INTERNA_FLUIDOS.
+        Fluid is stored in SSave (Tubos) and SSaveContenedores (Contenedores).
+        Each has a Contenido/_liquidos list of <Liquido><Tipo>…<Cantidad>… nodes.
+        """
+        dif = self.state["fluid_network"]
+        if dif is None:
+            return "Failed: Fluid network (DISTRIBUCION_INTERNA_FLUIDOS) not found."
+
+        agua_count = 0
+        boro_count = 0
+
+        for liquido in dif.findall(".//Liquido"):
+            tipo = liquido.find("Tipo")
+            cant = liquido.find("Cantidad")
+            if tipo is None or cant is None:
+                continue
+            tipo_text = tipo.text.strip() if tipo.text else ""
+            if tipo_text == "AGUA":
+                cant.text = "500000.0"
+                agua_count += 1
+            elif tipo_text == "BORO":
+                cant.text = "500000.0"
+                boro_count += 1
+
+        return (f"Fluids Flooded: filled {agua_count} water node(s) "
+                f"and {boro_count} boron node(s).")
