@@ -4,7 +4,7 @@
 ---
 # Partially working
 ---
-- **Nucleares V2.2.25.217**: Tested with the latest version of the mod tool, partially working. The mod tool itself is why it doesn't fully work, 
+- **Nucleares V2.2.25.217**: Tested with the latest version of the save mod tool, partially working. The save mod tool itself is why it doesn't fully work, 
 and this will probably be fixed as of save mod tool version V0.0.4-beta pre-release.
 ---
 # Not working/untested
