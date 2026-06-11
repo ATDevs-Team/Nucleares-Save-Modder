@@ -77,3 +77,7 @@ From [nucleares_state.py](nucleares_state.py) itself:
 > `BOOLEAN`     `true` / `1` / `yes` → `True`, else `False`.
 > `TEXT`        String; surrounding double-quotes are stripped.
 > ==============  ===================================================
+
+# How Does NSM Know They Exist?
+Currently, NSM will only know the database exists if it is inside the ./data/ folder, and is named correct_safe_values-<NUM>.nsmdb.
+Please only put correct safe values into these databases.
