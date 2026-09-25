@@ -98,6 +98,9 @@ class ModderApp:
 
         tk.Button(self.tab_simple, text="Apply Stats", command=self.do_simple_apply, bg="#2196F3", fg="white", font=("Arial", 11, "bold"), width=20).pack(pady=25)
 
+        tk.Label(self.tab_simple, text="Safety Equipment", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
+        tk.Button(self.tab_simple, text="☢️ Put On Hazmat Suit", command=lambda: self.run_cheat("wear_hazmat_suit"), width=25, height=2, bg="#FF9800", fg="black").pack(pady=5)
+
     def _build_reactor_tab(self):
         tk.Label(self.tab_reactor, text="Physics & Simulation Override", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 15))
         
