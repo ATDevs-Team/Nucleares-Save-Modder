@@ -221,7 +221,9 @@ or "insert/withdraw all control rods" cheat would live.
 
 Each `<objetos>` child is a generically-named element (tag = sanitized
 object name) whose `.text` is a **pipe (`|`) delimited** record. There are
-three observed shapes:
+three structurally distinct shapes (A/B/C below); §3.1 covers one
+important type-B example (control rods) in full detail since it's a
+primary modding target.
 
 **A. Scene/decoration objects (18 fields, no game-logic payload)** — pure
 Unity transform data for static props (carts, beams, hooks, rotor meshes,
@@ -284,6 +286,56 @@ nothing to decode), but it means NSM's manual-XML-editor object list only
 ever shows type-B objects. If a future feature wants to toggle switches by
 name, it'll need a separate code path that treats the last pipe field as a
 plain string, not an XML blob.
+
+### 3.1 Control rods — `BARRA_DE_CONTROL_<N>` objects (type B)
+
+Individual control rods turned out to be ordinary type-B `<objetos>`
+entries (tag `BarraDeControl`), **not** something inside the `NUCLEO` or
+`CONTROL_NEW_CORE` component payloads — they were missed by the first
+structure dump only because the sampler script grouped samples by
+id-prefix and hit its 25-sample cap before reaching `BARRA_DE_CONTROL_*`
+alphabetically. Save `00064` has **121** `BarraDeControl` objects total;
+**72** of them (8 rods × 9 banks) are actually assigned to a bank
+(`_datosPos_IdBanco != -1`) — the rest (`_datosPos_IdBanco == -1`) are
+unused/spare rod slots.
+
+```
+0: internal id        "BARRA_DE_CONTROL_90"
+1: display name         (same)
+2: object class          "BarraDeControl"
+3 (last): HTML-escaped <CSaveClass> payload:
+    Clase                  — usually empty for standard rods
+    _integridad            — 0-100 health
+    _reactividad           — true/false, whether currently absorbing
+    _lastCicloFision       — last fission cycle counter it participated in
+    _lastCicloAbsorvido    — last absorption cycle counter
+    _lastValorInsercion    — insertion depth (observed 0-46 in save 00064;
+                             this is the per-rod "how far in" value —
+                             the most direct SCRAM/withdraw-all target)
+    _particulasAbsorvibles / _particulasAbsorvidas — reactivity bookkeeping
+    _ciclosAbsorvidos      — lifetime absorption cycle count
+    _posY                  — physical Y height (mirrors DestinoSolicitado
+                             once the rod reaches its target)
+    _datosPos_IdBarra      — index (0-7) within its bank
+    _datosPos_IdBanco      — which bank (0-8) it belongs to, links to
+                             CONTROL_NEW_CORE/_bancos/CBancoSaveClass
+                             (see §2.3) and to
+                             MANTENIMIENTO/Elementos/CElemento[Tipo=
+                             BARRAS_DE_CONTROL]/DatosBDC/CDatosBDC
+                             (same IdBanco/Id pair, separate wear-tracking
+                             copy, see §6)
+    Temperatura            — rod temperature
+    DestinoSolicitado      — commanded/target insertion depth (what the
+                             control system is driving _posY toward)
+    _lastReactividad       — last reactivity contribution
+    TemperaturaTarget      — target temperature (usually 0/unused)
+```
+This is the real target for a future "full SCRAM" (drive every assigned
+rod's `DestinoSolicitado`/`_posY`/`_lastValorInsercion` to the fully
+inserted position) or "withdraw all rods" cheat — iterate
+`findall(".//BarraDeControl/*")`-equivalent (i.e. every `objetos` child
+whose class is `BarraDeControl`) and skip the ones with
+`_datosPos_IdBanco == -1` (unassigned spares).
 
 ---
 ## 4. Player / progression data
@@ -414,7 +466,79 @@ the data worth exposing later: `FUEL` (in containers), `VAPOR` (gas).
   observed saves).
 
 ---
-## 7. Chronology cross-check (why this matters for testing)
+## 7. The `.sqlite` companion file — historical statistics log
+
+Each save `savegame_025_<N>.xml` ships alongside `savegame_025_<N>.xml.sqlite`
+(and, for the two saves with recent activity, a `.log` file — see below).
+README previously said *"NSM doesn't know how to modify the .sqlite files
+because we have no idea what they do."* — resolved:
+
+### Schema
+A single table, always named `Estadisticas`:
+```sql
+CREATE TABLE Estadisticas (Dia INTEGER, Hora INTEGER, Minuto INTEGER, Tipo INTEGER, Valor REAL)
+```
+It's a **time-series telemetry log**, one row per `(Dia, Hora, Minuto,
+Tipo)` sample, that feeds the in-game historical graphs (the
+`GraficoBarras` UI element referenced elsewhere in the save, and
+`HISTORIA/Stat_Energy_Generated`). `save_00064.xml.sqlite` has 3766 rows
+spanning in-game Day 6 15:00 through Day 20 5:44.
+
+**Confirmed by cross-referencing against the XML**: the last row's
+`(Dia, Hora, Minuto)` in each `.sqlite` matches the corresponding save's
+`AMBIENTE/{Dias,Hora,Minuto}` *whenever the reactor was actively running*
+at save time (`00063`, `00064`, `AUTOSAVE` all match exactly). When the
+reactor was idle/shut down at save time (`00061`, `00062`, `00065`), the
+last logged row is **stale by hours or days** — logging appears to be
+tied to reactor activity, not wall-clock/game-clock ticking in general.
+`savegame_025_00066.xml.sqlite` (the fresh new-game save) is **0 bytes** —
+an uninitialized/empty SQLite file, consistent with no statistics having
+been generated yet.
+
+### The `Tipo` enum (partially decoded by value-range/timing correlation)
+`Tipo` has no label in the file; its meaning was inferred by matching
+value ranges/magnitudes against known XML fields from the same save:
+
+| Tipo | Sample count (00064) | Value range | Best-guess meaning | Evidence |
+|---|---|---|---|---|
+| 0 | 653 | 2,953 – 90,284,216 | Power generated/received (W) | last value 918,352 ≈ `TRANSFORMACION/LastRecibida` (918,364) |
+| 3 | 626 | 772,097 – 90,218,976 | Power delivered to external grid (W) | last value 917,860 ≈ `TRANSFORMACION/EnergiaEntregadaExterior` (917,848.6) |
+| 5 | 206 | constant 90.0 | A fixed threshold/setpoint | matches the "minimum service compliance of 90%" objective in `HISTORIA` |
+| 1 | 206 | 672,000 – 1,904,000 | Unconfirmed — possibly hourly revenue or demand | — |
+| 2, 4 | 653 / 626 | 1 – 60 | Unconfirmed — small bounded counters (minutes? compliance ticks?) | — |
+| 6 | 170 | 44,000 – 6,776,880 | Unconfirmed — possibly city/grid demand (W) | order-of-magnitude matches `AMBIENTE/PotenciaMaximaInstalada`-scale values |
+| 9 | 626 | 0 – 13,210,906 | Unconfirmed — possibly core radioactivity/heat trend | order-of-magnitude matches `NUCLEO/_radioactividadPasiva` |
+
+Only Tipo 0, 3, and 5 have reasonably strong corroborating evidence; the
+rest are educated guesses from magnitude/count alone and should be
+verified against a save with a clean, controlled before/after (e.g. toggle
+one system, save, diff the newly-appended rows) before anything writes to
+this table.
+
+### Should NSM touch this file at all?
+Given it's purely a historical/graphing log — not consulted by the game
+to restore live state — **modifying it has no gameplay effect** on load;
+the only reason to touch it would be cosmetic (making the in-game history
+graphs show different past trends) or to fabricate history for a "new"
+save built from a template. It is safe to leave untouched for every cheat
+described elsewhere in this document. If NSM ever wants to write it, use
+Python's stdlib `sqlite3` module directly (no new dependency needed) —
+`nucleares_io.py` would gain a sibling `read_stats_db()`/
+`write_stats_db()` pair rather than extending the XML-only helpers.
+
+### The `.log` files
+Two of the seven saves had a companion `.log` (`00065`, `AUTOSAVE`) — these
+are plain-text, newline-delimited runtime traces
+(`<hour>:<min>:<realtime-cycle>:<subtick> | MEASURE|SET|REQUEST  <SUBSYSTEM> <METRIC>: <value>`,
+e.g. `19:22:15:1:584.4003 | MEASURE  CRITICAL MASS CORE: 1`). These look
+like a rolling debug/telemetry trace the game keeps for the most recently
+active session(s) rather than a permanent per-save artifact (only the two
+most recently played saves had one) — not something a save-editor should
+generate or needs to parse; useful only for a human diagnosing a specific
+session's behavior (crash/meltdown post-mortem).
+
+---
+## 8. Chronology cross-check (why this matters for testing)
 
 The 7 saves used for this analysis, ordered by **in-game** day (not file
 mtime — file mtime and in-game day diverge because two separate games were
@@ -436,7 +560,7 @@ off"/"just tripped, xenon nonzero" paths, 00062-00064/AUTOSAVE exercise the
 suite.
 
 ---
-## 8. Implications for NSMDB redesign (for the next round of work)
+## 9. Implications for NSMDB redesign (for the next round of work)
 
 Things worth reconsidering now that the real format is confirmed:
 1. **Drop or de-prioritize the `_valoresFloat`/etc. dict-container lookup**
@@ -469,3 +593,17 @@ Things worth reconsidering now that the real format is confirmed:
    `repair_all_objects` only touches the latter today, so a save can show
    "0 outstanding maintenance" per-component while `MANTENIMIENTO` still
    lists pending jobs, or vice versa — worth reconciling.
+6. **Control rods, fuel blocks, and pipes are all now fully addressable**:
+   rods and fuel blocks live in `<objetos>` as type-B entries (§3.1, §3-B)
+   and can be bulk-edited with the same `for obj in state["objects"]`
+   pattern `repair_all_objects` already uses (filter by
+   `parts_prefix[2] == "BarraDeControl"` or `"BloqueCombustible"`); pipes
+   live in `DISTRIBUCION_INTERNA_FLUIDOS/Tubos/SSave` (§5) and are already
+   reachable the same way `flood_reserves` reaches `Contenedores`. None of
+   these three need new parsing infrastructure — only new cheat methods
+   that loop over the existing `state["objects"]` / `state["fluid_network"]`
+   collections with the right tag filters.
+7. **The `.sqlite` companion file (§7) needs no changes for gameplay
+   cheats** — it's a display-only historical log with no effect on load.
+   Leave it alone unless a future feature specifically wants to touch the
+   in-game history graphs.
