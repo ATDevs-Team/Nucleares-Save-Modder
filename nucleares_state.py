@@ -1055,3 +1055,68 @@ class SaveMemoryManager:
             )
 
         return "Applied safe values to: " + ", ".join(targets) + "."
+
+    # ── wear_hazmat_suit ──
+
+    def wear_hazmat_suit(self, suit_number: int | None = None) -> str:
+        """
+        Puts the player in a ``TrajeProtector`` (radiation/hazmat) suit.
+
+        Sets ``JUGADOR/TRAJE_LlevaPuesto=true`` and
+        ``JUGADOR/TRAJE_Nombre=TRAJE_PROTECTOR_<N>``, and removes that
+        suit's entry from ``<objetos>``.
+
+        Both steps are required: confirmed against a real Player.log that
+        setting only the two JUGADOR flags while leaving the suit's object
+        sitting in its container causes a genuine
+        ``NullReferenceException`` in the game's own player-load code
+        (``JugadorLocal+CTraje.Load``), producing a ~3 minute hang the
+        player has to force-close. A real save made while actually wearing
+        a suit has no such object present in ``<objetos>`` at all — see
+        SAVE_FORMAT.md §11 for the full writeup.
+
+        *suit_number*: 1-6 to request a specific suit (``TRAJE_PROTECTOR_N``
+        in the six real saves inspected); if omitted, the first
+        ``TrajeProtector`` object found in the save is used.
+        """
+        jugador = self.state["player"].get("JUGADOR")
+        if jugador is None:
+            return "Failed: could not find JUGADOR in this save."
+
+        obj_node = self.master_root.find(".//objetos")
+        wanted_id = f"TRAJE_PROTECTOR_{suit_number}" if suit_number else None
+        target = None
+        if obj_node is not None:
+            for obj in obj_node:
+                if not obj.text or "|" not in obj.text:
+                    continue
+                parts = obj.text.split("|", 3)
+                if len(parts) < 3 or parts[2] != "TrajeProtector":
+                    continue
+                if wanted_id is None or parts[0] == wanted_id:
+                    target = obj
+                    wanted_id = parts[0]
+                    break
+
+        if wanted_id is None:
+            return "Failed: no TrajeProtector suit object found in this save to equip."
+
+        llevapuesto = jugador.find("TRAJE_LlevaPuesto")
+        if llevapuesto is None:
+            llevapuesto = ET.SubElement(jugador, "TRAJE_LlevaPuesto")
+        llevapuesto.text = "true"
+
+        nombre = jugador.find("TRAJE_Nombre")
+        if nombre is None:
+            nombre = ET.SubElement(jugador, "TRAJE_Nombre")
+        nombre.text = wanted_id
+
+        if target is not None:
+            obj_node.remove(target)
+            return f"Player is now wearing {wanted_id}."
+        return (
+            f"Player flagged as wearing {wanted_id}, but no matching object "
+            f"was found in <objetos> to remove (it may already be equipped, "
+            f"or this save has an unexpected layout) — double-check in-game "
+            f"before trusting this."
+        )
