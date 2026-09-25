@@ -389,7 +389,8 @@ of upgrade/modifier tags — `AUMENTO_POTENCIA`, `AUMENTO_RESISTENCIA`,
 | `PuertaTipoEscotilla` | Hatch-type door | `Estado` |
 | `RadiacionArea` | Radiation dosimeter/area sensor | `Radiacion` |
 | `SteamGenerator` | Steam generator equipment object (object form mirroring `EVAPORADOR`) | `Clase`, `Elemento`, construction fields |
-| `PalancaMecanica` id `PalancaSCRAM0`-`PalancaSCRAM8` | **The physical SCRAM lever, one per control-rod bank** (type-C: `field[last]_literal` is `True`/`False` — pulled/not pulled) | Confirmed via real Player.log (§10) to exist separately from `CONTROL_NEW_CORE/_bancos/_scramSolicitado`; likely the actual trigger a save editor needs to flip to `True` to command a SCRAM, since the internal flag alone persisted un-acted-upon through a load+resave. Other `PalancaMecanica` instances are ordinary valve-selector/bypass levers (`_SELECTOR_*`, `_BYPASS`, `_Frenos`) unrelated to SCRAM. |
+| `PalancaMecanica` id `PalancaSCRAM0`-`PalancaSCRAM8` | **The physical SCRAM lever, one per control-rod bank** (type-C: `field[last]_literal` is `True`/`False` — pulled/not pulled) | Confirmed via real Player.log (§10) to exist separately from `CONTROL_NEW_CORE/_bancos/_scramSolicitado`. Setting both to `True`/`true` together IS read by the reactor's control logic on load (confirmed: logs "solicitud de scram" per bank + disables each bank's rod-drive motor + releases the mechanical brakes), but this alone did not complete an actual rod drop over ~8 real minutes of simulation — the trigger mechanism isn't fully reproduced yet, see §10 round 2/3. |
+| `PalancaMecanica` id `PalancaMecanica_Frenos` | **The mechanical brake lever/status for the control-rod drive train** (type-C, `True` = brakes released) | Confirmed via real Player.log: releases in lockstep with a SCRAM request (`Liberando frenos en tren`). Other `PalancaMecanica` instances are ordinary valve-selector/bypass levers (`_SELECTOR_*`, `_BYPASS`) unrelated to SCRAM. |
 | `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `InterruptorTecla`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
 
 This confirms **every functional piece of plant equipment** (pumps,
@@ -793,13 +794,65 @@ effect." This is why the maintainer "didn't notice anything different" —
 there was no time for anything to happen either way, not necessarily
 because SCRAM does nothing.
 
-### Next experiment (round 2)
-Build a save that sets **both** `_scramSolicitado=true` on all banks
-**and** all 9 `PalancaSCRAM<N>` objects to `True`, and ask the maintainer
-to load it and let the game run un-paused for at least a few in-game
-minutes (watch `AMBIENTE/Minuto` advance, or just play normally for a
-minute or two) before saving, so there's actually simulated time for the
-rods to move in. Also re-run the alarm/damage test (§7-era `00071`) since
-the first attempt's result got lost to an unrelated save in the same
-slot — best to use a distinctive save-slot number unlikely to collide
-with normal play (e.g. `00099`) next time.
+### Round 2 result: the SCRAM request is received and starts executing, but never completes
+`savegame_025_00099.xml` set **both** `_scramSolicitado=true` on all 9
+banks **and** all 9 `PalancaSCRAM<N>` objects to `True`, in slot `00099`.
+It came back along with `Player.log` and a **new** save, `00100.xml`, made
+~62 in-game minutes later (confirmed: `AMBIENTE` moved from Day 20, 5:44
+to Day 20, 6:46; money unchanged at `1.2252137E+09`, confirming it's a
+genuine continuation of the same test, not an unrelated save this time)
+after ~468 real seconds of mostly-unpaused play (`Se ha pausado la
+historia` only appears twice, right at the very end).
+
+`Player.log` shows the request **was** picked up by the reactor's own
+control logic, immediately on load, for every bank:
+```
+101.759: El motor 8 fue desactivado manualmente True
+101.759: Se recibio en NewCore una solicitud de scram. Banco: 8
+101.759: Se recibio en 8 una solicitud de scram.
+... (repeated for banks 6, 4, 0, 2, 1, 7, 5, 3)
+101.759: Liberando frenos en tren: True
+```
+("Motor N was manually deactivated" / "SCRAM request received in NewCore,
+Bank N" / "Releasing brakes on train" — i.e. this reads as the real,
+in-engine SCRAM sequence: disable the rod-drive motors, then release the
+mechanical brakes so the rods can drop by gravity, exactly like a real
+control-rod SCRAM.) A previously-unnoticed object, `PalancaMecanica_Frenos`
+(the physical brake lever/status), also appears in the objetos list and
+came back `True` (released) in `00100.xml` — added to the §3.2 catalog.
+
+**But nothing further happened.** No completion/drop message appears
+anywhere later in the log. In the resulting `00100.xml`: `NUCLEO/Estado`
+is still `REACTIVO`, `CalorGenerado` is essentially unchanged (41.3 vs.
+the original 42.4), `XenonConcentracion`/`ReactividadXenon` are still `0`
+(would be climbing post-shutdown), and a sampled rod
+(`BARRA_DE_CONTROL_90`) has **identical** `_lastValorInsercion`/`_posY`/
+`DestinoSolicitado` (`46`/`6.48`/`6.48`) to the unmodified base save —
+the physical rod position never moved at all, despite ~8 real minutes of
+unpaused simulation with the motor off and brakes released. All 9
+`PalancaSCRAM<N>` and `_scramSolicitado` flags were still `true`/`True` in
+`00100.xml` too — the game never cleared them, whether because it's still
+"waiting" on something or because it silently gave up.
+
+Working theory: the save-injected `_scramSolicitado=true` reproduces the
+first *stage* of a real SCRAM (motor disable + brake release, which are
+themselves real and logged), but the actual gravity-drop physics never
+runs to completion — plausibly because the real in-game lever-pull sets
+additional companion state (a timer, an edge-trigger flag, something
+`_directo` — an untested `CBancoSaveClass` field alongside
+`_scramSolicitado` that was `false` in every observed save — might gate)
+that a save edit touching only `_scramSolicitado` doesn't reproduce.
+
+### Next experiment (round 3): stop guessing blind, diff a real manual SCRAM instead
+Two rounds of edit-then-load have shown the request registers but stalls
+before completion, and further blind field-guessing (e.g. trying
+`_directo=true`) has a low hit rate against an 872-field save with no
+source access. The higher-value next step is an **empirical diff**: from
+an unmodified, currently-running save (reactor `REACTIVO`), physically
+pull one real SCRAM lever in-game, save *immediately* afterward (within
+the same minute, so nothing else confounds the diff), and send both the
+pre-pull save and the post-pull save/Player.log. Diffing those two saves
+field-by-field will show exactly which values the game itself changes to
+execute a real SCRAM — turning this from inference into a direct read of
+the mechanism, and telling us precisely what NSM needs to write to
+replicate it.
