@@ -951,13 +951,18 @@ inferred to confirmed:
   It also states **"Damaged rods cannot be repaired by AO: they must be
   replaced"** — an in-game gameplay limitation that direct save-editing
   (as `repair_all_objects` does) legitimately bypasses.
-- Damaging `MANTENIMIENTO`'s `RequiereMantenimiento` flags plant-wide
-  triggered a previously-undocumented game mechanic: **"Frozen Time"**
-  (time stops, "consuming Prestige Points" i.e. `Puntos`/money, until it
-  runs out), with the AO assistant explicitly saying *"The plant has not
-  been operational for too long... the connections need maintenance, and
-  have not received it."* — confirms `MANTENIMIENTO`/`RequiereMantenimiento`
-  is read and consequential, not just a display flag.
+- **Correction (not an automatic consequence):** the "Frozen Time" screen
+  seen in the first screenshot was **manually enabled by the maintainer
+  immediately after loading**, as a precaution against dying to radiation
+  exposure while sightseeing the damage — not something the mass-damage
+  save itself triggered. It's a previously-undocumented mechanic worth
+  noting on its own (time stops, "consumes Prestige Points"/`Puntos` until
+  they run out), and the AO assistant's line about the plant needing
+  maintenance may still be a context-sensitive reaction to the damaged
+  `MANTENIMIENTO` state — but that's unconfirmed, not the "the game
+  auto-penalizes neglect" reading originally written here. Retracted
+  until tested deliberately (leave time running on a maintenance-flagged
+  save and see whether the game freezes it unprompted).
 - The core visibly went into a real meltdown state (`Play efecto meltdown
   en el core: True` in `Player.log`) with the reactor core window
   rendering a glowing green fog effect, an `EMERGENCY: REACTOR IS IN
