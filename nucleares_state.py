@@ -341,8 +341,19 @@ class SaveMemoryManager:
             "components": {},
             "fluid_network": None,        # Single decoded DIF element (mutable in-place)
             "fluid_network_node": None,   # The raw master XML node for write-back
-            "objects": []
+            "objects": [],
+            "switches": [],                # Type-C objetos entries: plain True/False literal, no XML payload
+            "maintenance": None,           # Decoded MANTENIMIENTO element (mutable in-place)
+            "maintenance_node": None,      # The raw master XML node for write-back
+            "alarms": None,                # Decoded CONFIG_ALARMAS element (mutable in-place)
+            "alarms_node": None,           # The raw master XML node for write-back
         }
+
+        # Non-fatal problems hit while parsing (e.g. a single malformed
+        # component payload) are collected here instead of raising, so one
+        # bad blob doesn't take down the whole load. Surface to the user via
+        # the GUI log.
+        self.parse_warnings: list[str] = []
 
         # Load the .nsmdb database from ./data/ next to the script
         self._db = NSMDatabase(
@@ -363,13 +374,24 @@ class SaveMemoryManager:
     # ------------------------------------------------------------------
 
     def _parse_into_memory(self):
-        """Builds the abstract in-memory state from the master XML tree."""
+        """
+        Builds the abstract in-memory state from the master XML tree.
+
+        Every payload decode below is wrapped so a single malformed/unknown
+        blob (a corrupted node, an unexpected save variant, etc.) is
+        recorded in ``self.parse_warnings`` and skipped, rather than
+        aborting the entire load — a save with one bad component should
+        still let the rest of it be edited.
+        """
 
         # 1. Player nodes (HTML-encoded XML blobs)
         for tag in ["JUGADOR", "LOGROS_MLIBRE"]:
             node = self.master_root.find(f".//{tag}")
             if node is not None and node.text:
-                self.state["player"][tag] = _html_decode(node.text)
+                try:
+                    self.state["player"][tag] = _html_decode(node.text)
+                except (ValueError, ET.ParseError) as exc:
+                    self.parse_warnings.append(f"Could not decode player node <{tag}>: {exc}")
 
         # 2. Reactor components (also HTML-encoded XML blobs inside <componentes>)
         comps_node = self.master_root.find(".//componentes")
@@ -377,11 +399,17 @@ class SaveMemoryManager:
             for comp in comps_node:
                 if comp.text and ("<?xml" in comp.text or "&lt;" in comp.text):
                     # HTML-encoded XML payload
-                    self.state["components"][comp.tag] = {
-                        "type": "encoded",
-                        "master_element": comp,
-                        "inner_xml": _html_decode(comp.text),
-                    }
+                    try:
+                        self.state["components"][comp.tag] = {
+                            "type": "encoded",
+                            "master_element": comp,
+                            "inner_xml": _html_decode(comp.text),
+                        }
+                    except (ValueError, ET.ParseError) as exc:
+                        self.parse_warnings.append(
+                            f"Could not decode component <{comp.tag}>: {exc} "
+                            f"— left untouched, will round-trip byte-for-byte."
+                        )
                 else:
                     self.state["components"][comp.tag] = {
                         "type": "direct",
@@ -392,11 +420,31 @@ class SaveMemoryManager:
         # 3. Fluid network — lives in <DISTRIBUCION_INTERNA_FLUIDOS>
         dif_node = self.master_root.find(".//DISTRIBUCION_INTERNA_FLUIDOS")
         if dif_node is not None and dif_node.text:
-            self.state["fluid_network_node"] = dif_node
-            self.state["fluid_network"] = _html_decode(dif_node.text)
+            try:
+                self.state["fluid_network_node"] = dif_node
+                self.state["fluid_network"] = _html_decode(dif_node.text)
+            except (ValueError, ET.ParseError) as exc:
+                self.state["fluid_network_node"] = None
+                self.parse_warnings.append(f"Could not decode fluid network: {exc}")
 
-        # 4. Objects — pipe-separated strings; only those whose LAST segment
-        #    is an XML payload are mapped.
+        # 3b. MANTENIMIENTO — the finer-grained per-part wear/maintenance-job
+        #     tracker (parallel to, and not otherwise reachable from, the
+        #     per-component Integridad fields; see SAVE_FORMAT.md §6/§9).
+        self.state["maintenance_node"], self.state["maintenance"] = \
+            self._decode_singleton_top_level("MANTENIMIENTO")
+
+        # 3c. CONFIG_ALARMAS — the alarm-threshold/live-status table.
+        self.state["alarms_node"], self.state["alarms"] = \
+            self._decode_singleton_top_level("CONFIG_ALARMAS")
+
+        # 4. Objects — pipe-separated strings. Two shapes are mapped:
+        #      - whose LAST segment is an HTML-escaped XML payload (fuel
+        #        blocks, control rods, pumps, turbines, ...) -> state["objects"]
+        #      - exactly 4 fields whose last field is a bare True/False
+        #        literal (switches/levers, e.g. the PalancaSCRAM control-rod
+        #        SCRAM levers) -> state["switches"]
+        #    Pure scene-decoration objects (18 plain fields, no game state)
+        #    are intentionally left unparsed — nothing to edit there.
         obj_node = self.master_root.find(".//objetos")
         if obj_node is not None:
             for obj in obj_node:
@@ -404,17 +452,47 @@ class SaveMemoryManager:
                     continue
                 parts = obj.text.split("|")
                 last = parts[-1]
-                if "<?xml" not in last and "&lt;" not in last:
+
+                if "<?xml" in last or "&lt;" in last:
+                    try:
+                        inner_xml = _html_decode(last)
+                        self.state["objects"].append({
+                            "master_element": obj,
+                            "parts_prefix": parts[:-1],
+                            "inner_xml": inner_xml,
+                        })
+                    except (ValueError, ET.ParseError) as exc:
+                        self.parse_warnings.append(
+                            f"Could not decode object payload for "
+                            f"'{parts[0] if parts else obj.tag}': {exc}"
+                        )
                     continue
-                try:
-                    inner_xml = _html_decode(last)
-                    self.state["objects"].append({
+
+                if len(parts) == 4 and last in ("True", "False"):
+                    self.state["switches"].append({
                         "master_element": obj,
-                        "parts_prefix": parts[:-1],
-                        "inner_xml": inner_xml,
+                        "parts": parts,   # mutable: parts[3] is the live True/False value
+                        "id": parts[0],
+                        "name": parts[1],
+                        "class": parts[2],
                     })
-                except (ValueError, ET.ParseError):
-                    continue
+
+    def _decode_singleton_top_level(self, tag: str):
+        """
+        Find and decode a single top-level payload node by tag (e.g.
+        ``MANTENIMIENTO``, ``CONFIG_ALARMAS``) the same way the fluid
+        network is handled. Returns ``(node, decoded_element)``, or
+        ``(None, None)`` if the tag is absent or fails to decode (recorded
+        in ``self.parse_warnings``).
+        """
+        node = self.master_root.find(f".//{tag}")
+        if node is None or not node.text:
+            return None, None
+        try:
+            return node, _html_decode(node.text)
+        except (ValueError, ET.ParseError) as exc:
+            self.parse_warnings.append(f"Could not decode {tag}: {exc}")
+            return None, None
 
     # ------------------------------------------------------------------
     # COMMIT
@@ -440,11 +518,27 @@ class SaveMemoryManager:
         if dif_node is not None and dif is not None:
             dif_node.text = encode_payload(dif)
 
+        # Maintenance job list
+        maint_node = self.state["maintenance_node"]
+        maint = self.state["maintenance"]
+        if maint_node is not None and maint is not None:
+            maint_node.text = encode_payload(maint)
+
+        # Alarm config/live-status table
+        alarms_node = self.state["alarms_node"]
+        alarms = self.state["alarms"]
+        if alarms_node is not None and alarms is not None:
+            alarms_node.text = encode_payload(alarms)
+
         # Objects
         for obj_data in self.state["objects"]:
             encoded_xml = encode_payload(obj_data["inner_xml"])
             full_string = "|".join(obj_data["parts_prefix"] + [encoded_xml])
             obj_data["master_element"].text = full_string
+
+        # Switches/levers (plain True/False literal, no XML payload)
+        for sw in self.state["switches"]:
+            sw["master_element"].text = "|".join(sw["parts"])
 
     # ------------------------------------------------------------------
     # UTILITIES
@@ -459,68 +553,61 @@ class SaveMemoryManager:
         dif = self.state["fluid_network"]
         if dif is not None:
             mapping["[Fluid] DISTRIBUCION_INTERNA_FLUIDOS"] = dif
+        if self.state["maintenance"] is not None:
+            mapping["[Top] MANTENIMIENTO"] = self.state["maintenance"]
+        if self.state["alarms"] is not None:
+            mapping["[Top] CONFIG_ALARMAS"] = self.state["alarms"]
         for obj in self.state["objects"]:
             obj_id = obj["parts_prefix"][0] if obj["parts_prefix"] else "unknown"
             mapping[f"[Object] {obj_id}"] = obj["inner_xml"]
         return mapping
 
-    def _set_dict_value(self, root_element, dict_name, key_name, new_value, value_tag):
-        dict_element = root_element.find(f".//{dict_name}")
-        if dict_element is None:
-            return False
-        children = list(dict_element)
-        for i in range(len(children) - 1):
-            if children[i].tag == "string" and children[i].text == key_name:
-                if children[i + 1].tag == value_tag:
-                    children[i + 1].text = str(new_value)
-                    return True
-        return False
+    # ── switches / levers (type-C objetos entries) ──
+
+    def list_switches(self, class_filter: str | None = None, id_prefix: str | None = None):
+        """
+        Return the ``state["switches"]`` entries, optionally filtered by
+        object class (e.g. ``"PalancaMecanica"``) and/or by an id prefix
+        (e.g. ``"PalancaSCRAM"`` to get every control-rod SCRAM lever).
+        """
+        result = self.state["switches"]
+        if class_filter is not None:
+            result = [s for s in result if s["class"] == class_filter]
+        if id_prefix is not None:
+            result = [s for s in result if s["id"].startswith(id_prefix)]
+        return result
+
+    def set_switch(self, switch_entry: dict, value: bool) -> None:
+        """Set one switch (as returned by :meth:`list_switches`) to on/off."""
+        switch_entry["parts"][3] = "True" if value else "False"
+
+    def set_switches(self, class_filter: str | None = None, id_prefix: str | None = None,
+                      value: bool = True) -> int:
+        """Bulk-set every matching switch; returns how many were changed."""
+        matches = self.list_switches(class_filter=class_filter, id_prefix=id_prefix)
+        for sw in matches:
+            self.set_switch(sw, value)
+        return len(matches)
 
     # ── database helpers ──
 
     def _apply_db_tag(self, inner_xml: ET.Element, tag: str) -> int:
         """
-        Apply every key/value stored in the database under *tag* to *inner_xml*.
-
-        Strategy
-        --------
-        1. Direct element search via ``find(".//KEY")``.  This covers virtually
-           all reactor-component fields.
-        2. Dict-value fallback — tries the game's serialisation dictionaries
-           (``_valoresFloat``, ``_valoresInt``, ``_valoresBool``,
-           ``_valoresString``) via :meth:`_set_dict_value`.  This covers
-           player-data fields that live inside those typed maps.
-
-        Returns the number of XML fields that were actually written.
+        Apply every key/value stored in the database under *tag* to *inner_xml*
+        via a direct ``find(".//KEY")`` element search — confirmed (by
+        exhaustively indexing every field in 7 real saves, see
+        SAVE_FORMAT.md) to be how every field in the current save format is
+        actually stored. Returns the number of XML fields that were written.
         """
         if not self._db.has_tag(tag):
             return 0
 
-        # Map NSM type strings → (dict_container_name, xml_value_element_tag)
-        _DICT_CONTAINERS: dict[str, tuple[str, str]] = {
-            "FLOAT":   ("_valoresFloat",   "float"),
-            "INT":     ("_valoresInt",     "int"),
-            "BOOLEAN": ("_valoresBool",    "bool"),
-            "TEXT":    ("_valoresString",  "string"),
-        }
-
         written = 0
-        for key, (value, type_str) in self._db.tag_keys(tag).items():
-            xml_str = self._db.get_as_str(tag, key)  # ready-to-write string
-
-            # ── attempt 1: direct element ──
+        for key in self._db.tag_keys(tag):
             elem = inner_xml.find(f".//{key}")
             if elem is not None:
-                elem.text = xml_str
+                elem.text = self._db.get_as_str(tag, key)
                 written += 1
-                continue
-
-            # ── attempt 2: dict-value serialisation ──
-            container = _DICT_CONTAINERS.get(type_str)
-            if container:
-                dict_name, xml_tag = container
-                if self._set_dict_value(inner_xml, dict_name, key, value, xml_tag):
-                    written += 1
 
         return written
 
@@ -533,6 +620,10 @@ class SaveMemoryManager:
         exp   = min(max(float(exp   if exp   else 0), 0.0), 1_000_000_000.0)
         level = min(max(int  (level if level else 1), 1), 100)
 
+        # Money/XP/level live in LOGROS_MLIBRE in the current save format.
+        # (JUGADOR holds physical player state -- health/position/radiation
+        # -- not stats; a JUGADOR-side _valoresFloat dict write was removed
+        # here because it never matched any real save, see SAVE_FORMAT.md §1.)
         logros = self.state["player"].get("LOGROS_MLIBRE")
         if logros is not None:
             for tag, val in [("Puntos", money), ("NuevoPuntos", money),
@@ -543,57 +634,87 @@ class SaveMemoryManager:
                 else:
                     ET.SubElement(logros, tag).text = str(val)
 
-        jugador = self.state["player"].get("JUGADOR")
-        if jugador is not None:
-            self._set_dict_value(jugador, "_valoresFloat", "dinero",      money,        "float")
-            self._set_dict_value(jugador, "_valoresFloat", "experiencia", exp,          "float")
-            self._set_dict_value(jugador, "_valoresFloat", "nivel",       float(level), "float")
-
         return f"Stats Applied: Money={money:,.0f}, Level={level}, EXP={exp:,.0f}"
 
     # ── repair_all_objects ──
 
     def repair_all_objects(self):
         """
-        Repair every object, component, and fluid-network pipe in the save.
+        Repair every object, control rod, component, fluid-network pipe,
+        maintenance job, and alarm in the save — as close to "fix
+        everything" as the confirmed field set allows.
 
-        Target values are taken from the ``REPAIR_DEFAULTS`` database tag when
-        present, falling back to the built-in safe defaults shown below.
+        Target values are taken from the ``REPAIR_DEFAULTS`` database tag
+        when present, falling back to the built-in safe defaults shown
+        below. This intentionally covers *damage/wear* state only, not
+        consumable resources (fuel, coolant, boron) — those are refilled by
+        the separate ``max_backup_generators``/``flood_reserves`` cheats so
+        "repair" and "refuel" stay distinct actions.
 
         REPAIR_DEFAULTS keys
         --------------------
-        ``Integridad``       (FLOAT, default 100.0)
-        ``desgaste``         (FLOAT, default 0.0)
-        ``porcentaje_roto``  (FLOAT, default 0.0)
-        ``temperatura``      (FLOAT, default 20.0)
+        ``Integridad``    (FLOAT, default 100.0)
+        ``temperatura``   (FLOAT, default 20.0)
+
+        Note: earlier versions of this method also tried to reset
+        ``desgaste``/``porcentaje_roto`` via a ``_valoresFloat`` dict lookup
+        that (confirmed by exhaustively indexing every field across 7 real
+        saves, see SAVE_FORMAT.md §1) never matches anything in the current
+        save format — those two calls were silent no-ops, and control rods'
+        own ``_integridad`` field (lowercase, unlike everything else's
+        ``Integridad``) was missed entirely. Both are fixed below, along
+        with extending coverage to the fluid network's non-Integridad
+        damage fields, the MANTENIMIENTO job list (a second, finer-grained
+        wear tracker parallel to the per-component fields — see
+        SAVE_FORMAT.md §6/§9), and CONFIG_ALARMAS' live alarm status.
         """
         # ── resolve target values (DB → hardcoded fallback) ──
-        tgt_integridad  = self._db.get("REPAIR_DEFAULTS", "Integridad",       100.0)
-        tgt_desgaste    = self._db.get("REPAIR_DEFAULTS", "desgaste",           0.0)
-        tgt_roto        = self._db.get("REPAIR_DEFAULTS", "porcentaje_roto",    0.0)
-        tgt_temperatura = self._db.get("REPAIR_DEFAULTS", "temperatura",       20.0)
+        tgt_integridad  = self._db.get("REPAIR_DEFAULTS", "Integridad", 100.0)
+        tgt_temperatura = self._db.get("REPAIR_DEFAULTS", "temperatura", 20.0)
 
-        tgt_integridad_str  = self._db.get_as_str("REPAIR_DEFAULTS", "Integridad",      str(tgt_integridad))
-        tgt_desgaste_str    = self._db.get_as_str("REPAIR_DEFAULTS", "desgaste",         str(tgt_desgaste))
-        tgt_roto_str        = self._db.get_as_str("REPAIR_DEFAULTS", "porcentaje_roto",  str(tgt_roto))
-        tgt_temperatura_str = self._db.get_as_str("REPAIR_DEFAULTS", "temperatura",      str(tgt_temperatura))
+        tgt_integridad_str  = self._db.get_as_str("REPAIR_DEFAULTS", "Integridad",  str(tgt_integridad))
+        tgt_temperatura_str = self._db.get_as_str("REPAIR_DEFAULTS", "temperatura", str(tgt_temperatura))
+
+        def integridad_ok(text):
+            return text in (tgt_integridad_str, str(int(tgt_integridad)))
 
         count = 0
 
-        # 1. Objects with XML payloads (fuel rods, pumps, valves, etc.)
+        # 1. Objects with XML payloads (fuel rods, control rods, pumps,
+        #    turbines, valves, resistors, transformers, cranes, ...)
         for obj in self.state["objects"]:
             inner = obj["inner_xml"]
             repaired = False
-            if self._set_dict_value(inner, "_valoresFloat", "porcentaje_roto", tgt_roto,        "float"):
+
+            # Control rods use a lowercase "_integridad", everything else
+            # uses "Integridad" -- check both.
+            for integ_tag in ("Integridad", "_integridad"):
+                elem = inner.find(f".//{integ_tag}")
+                if elem is not None and not integridad_ok(elem.text):
+                    elem.text = tgt_integridad_str
+                    repaired = True
+
+            elem = inner.find(".//Temperatura")
+            if elem is not None and elem.text != tgt_temperatura_str:
+                elem.text = tgt_temperatura_str
                 repaired = True
-            if self._set_dict_value(inner, "_valoresFloat", "desgaste",        tgt_desgaste,    "float"):
+
+            elem = inner.find(".//_nivelDanoActual")
+            if elem is not None and elem.text != "NADA":
+                elem.text = "NADA"
                 repaired = True
-            if self._set_dict_value(inner, "_valoresFloat", "temperatura",     tgt_temperatura, "float"):
+
+            for bool_tag in ("IsDestruida", "SelloRoto", "IsAtascada", "IsEnCorto"):
+                elem = inner.find(f".//{bool_tag}")
+                if elem is not None and elem.text == "true":
+                    elem.text = "false"
+                    repaired = True
+
+            elem = inner.find(".//OxidoAcumulado")
+            if elem is not None and elem.text != "0":
+                elem.text = "0"
                 repaired = True
-            elem = inner.find(".//Integridad")
-            if elem is not None and elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
-                elem.text = tgt_integridad_str
-                repaired = True
+
             if repaired:
                 count += 1
 
@@ -604,13 +725,14 @@ class SaveMemoryManager:
 
             for tag in ["Integridad", "IntegridadCalentadores", "IntegridadReliefTank"]:
                 for elem in inner.findall(f".//{tag}"):
-                    if elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
+                    if not integridad_ok(elem.text):
                         elem.text = tgt_integridad_str
                         repaired = True
 
             for tag in ["RequiereMantenimiento", "IsContaminado",
                         "DesactivadoPorFaltaDeSuministro",
-                        "RequiereMantenimientoCalentadores"]:
+                        "RequiereMantenimientoCalentadores",
+                        "IsDestruida", "IsAtascada"]:
                 for elem in inner.findall(f".//{tag}"):
                     if elem.text == "true":
                         elem.text = "false"
@@ -623,8 +745,70 @@ class SaveMemoryManager:
         dif = self.state["fluid_network"]
         if dif is not None:
             for elem in dif.findall(".//Integridad"):
-                if elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
+                if not integridad_ok(elem.text):
                     elem.text = tgt_integridad_str
+                    count += 1
+            for elem in dif.findall(".//PerdidaEfectivaDeFluido"):
+                if elem.text != "0":
+                    elem.text = "0"
+                    count += 1
+            for tag in ("OxidoPresente", "fluidoPerdido"):
+                for elem in dif.findall(f".//{tag}"):
+                    if elem.text == "true":
+                        elem.text = "false"
+                        count += 1
+
+        # 4. MANTENIMIENTO — the per-part maintenance-job tracker. Clears
+        #    the damage/contamination readings on every job entry and every
+        #    individual control-rod entry in its DatosBDC sub-list.
+        maint = self.state["maintenance"]
+        if maint is not None:
+            for elem_node in maint.findall(".//CElemento"):
+                repaired = False
+                for tag in ("Integridad", "Desgaste"):
+                    e = elem_node.find(tag)
+                    if e is not None and not integridad_ok(e.text) and e.text != "0":
+                        # Integridad -> 100, Desgaste (wear) -> 0
+                        e.text = tgt_integridad_str if tag == "Integridad" else "0"
+                        repaired = True
+                for tag in ("Oxido", "PresenciaYodo", "PresenciaXenon"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text != "0":
+                        e.text = "0"
+                        repaired = True
+                for tag in ("Contaminado", "RequiereMantenimiento", "Desalineado"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text == "true":
+                        e.text = "false"
+                        repaired = True
+                e = elem_node.find("MotivoDelFallo")
+                if e is not None and e.text != "NINGUNO":
+                    e.text = "NINGUNO"
+                    repaired = True
+                if repaired:
+                    count += 1
+            for elem_node in maint.findall(".//DatosBDC/CDatosBDC"):
+                e = elem_node.find("Integridad")
+                if e is not None and not integridad_ok(e.text):
+                    e.text = tgt_integridad_str
+                    count += 1
+
+        # 5. CONFIG_ALARMAS — clear every live alarm now that the
+        #    underlying damage has been repaired.
+        alarms = self.state["alarms"]
+        if alarms is not None:
+            for elem_node in alarms.findall(".//CConfigAlarmas"):
+                repaired = False
+                actual = elem_node.find("Actual")
+                if actual is not None and actual.text != "0":
+                    actual.text = "0"
+                    repaired = True
+                for tag in ("IsActiva", "IsActualizada"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text == "true":
+                        e.text = "false"
+                        repaired = True
+                if repaired:
                     count += 1
 
         return f"Fully repaired {count} reactor objects and systems."
@@ -871,3 +1055,68 @@ class SaveMemoryManager:
             )
 
         return "Applied safe values to: " + ", ".join(targets) + "."
+
+    # ── wear_hazmat_suit ──
+
+    def wear_hazmat_suit(self, suit_number: int | None = None) -> str:
+        """
+        Puts the player in a ``TrajeProtector`` (radiation/hazmat) suit.
+
+        Sets ``JUGADOR/TRAJE_LlevaPuesto=true`` and
+        ``JUGADOR/TRAJE_Nombre=TRAJE_PROTECTOR_<N>``, and removes that
+        suit's entry from ``<objetos>``.
+
+        Both steps are required: confirmed against a real Player.log that
+        setting only the two JUGADOR flags while leaving the suit's object
+        sitting in its container causes a genuine
+        ``NullReferenceException`` in the game's own player-load code
+        (``JugadorLocal+CTraje.Load``), producing a ~3 minute hang the
+        player has to force-close. A real save made while actually wearing
+        a suit has no such object present in ``<objetos>`` at all — see
+        SAVE_FORMAT.md §11 for the full writeup.
+
+        *suit_number*: 1-6 to request a specific suit (``TRAJE_PROTECTOR_N``
+        in the six real saves inspected); if omitted, the first
+        ``TrajeProtector`` object found in the save is used.
+        """
+        jugador = self.state["player"].get("JUGADOR")
+        if jugador is None:
+            return "Failed: could not find JUGADOR in this save."
+
+        obj_node = self.master_root.find(".//objetos")
+        wanted_id = f"TRAJE_PROTECTOR_{suit_number}" if suit_number else None
+        target = None
+        if obj_node is not None:
+            for obj in obj_node:
+                if not obj.text or "|" not in obj.text:
+                    continue
+                parts = obj.text.split("|", 3)
+                if len(parts) < 3 or parts[2] != "TrajeProtector":
+                    continue
+                if wanted_id is None or parts[0] == wanted_id:
+                    target = obj
+                    wanted_id = parts[0]
+                    break
+
+        if wanted_id is None:
+            return "Failed: no TrajeProtector suit object found in this save to equip."
+
+        llevapuesto = jugador.find("TRAJE_LlevaPuesto")
+        if llevapuesto is None:
+            llevapuesto = ET.SubElement(jugador, "TRAJE_LlevaPuesto")
+        llevapuesto.text = "true"
+
+        nombre = jugador.find("TRAJE_Nombre")
+        if nombre is None:
+            nombre = ET.SubElement(jugador, "TRAJE_Nombre")
+        nombre.text = wanted_id
+
+        if target is not None:
+            obj_node.remove(target)
+            return f"Player is now wearing {wanted_id}."
+        return (
+            f"Player flagged as wearing {wanted_id}, but no matching object "
+            f"was found in <objetos> to remove (it may already be equipped, "
+            f"or this save has an unexpected layout) — double-check in-game "
+            f"before trusting this."
+        )
