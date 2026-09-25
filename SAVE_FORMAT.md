@@ -389,7 +389,8 @@ of upgrade/modifier tags — `AUMENTO_POTENCIA`, `AUMENTO_RESISTENCIA`,
 | `PuertaTipoEscotilla` | Hatch-type door | `Estado` |
 | `RadiacionArea` | Radiation dosimeter/area sensor | `Radiacion` |
 | `SteamGenerator` | Steam generator equipment object (object form mirroring `EVAPORADOR`) | `Clase`, `Elemento`, construction fields |
-| `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `InterruptorTecla`, `PalancaMecanica`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
+| `PalancaMecanica` id `PalancaSCRAM0`-`PalancaSCRAM8` | **The physical SCRAM lever, one per control-rod bank** (type-C: `field[last]_literal` is `True`/`False` — pulled/not pulled) | Confirmed via real Player.log (§10) to exist separately from `CONTROL_NEW_CORE/_bancos/_scramSolicitado`; likely the actual trigger a save editor needs to flip to `True` to command a SCRAM, since the internal flag alone persisted un-acted-upon through a load+resave. Other `PalancaMecanica` instances are ordinary valve-selector/bypass levers (`_SELECTOR_*`, `_BYPASS`, `_Frenos`) unrelated to SCRAM. |
+| `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `InterruptorTecla`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
 
 This confirms **every functional piece of plant equipment** (pumps,
 turbines, generators, resistors, transformers, valves, cranes, control-rod
@@ -596,16 +597,33 @@ verified against a save with a clean, controlled before/after (e.g. toggle
 one system, save, diff the newly-appended rows) before anything writes to
 this table.
 
-### Should NSM touch this file at all?
-Given it's purely a historical/graphing log — not consulted by the game
-to restore live state — **modifying it has no gameplay effect** on load;
-the only reason to touch it would be cosmetic (making the in-game history
-graphs show different past trends) or to fabricate history for a "new"
-save built from a template. It is safe to leave untouched for every cheat
-described elsewhere in this document. If NSM ever wants to write it, use
-Python's stdlib `sqlite3` module directly (no new dependency needed) —
-`nucleares_io.py` would gain a sibling `read_stats_db()`/
-`write_stats_db()` pair rather than extending the XML-only helpers.
+### Should NSM touch this file at all? — **yes: confirmed bug if it doesn't**
+Originally assessed as purely cosmetic and safe to leave untouched. **This
+was wrong, confirmed by real-game testing (§10):** if a save is loaded
+whose companion `.sqlite` is missing or lacks the `Estadisticas` table
+(exactly the situation for any save NSM writes today, since it never
+creates one), the game logs two non-fatal errors on every load —
+
+```
+ERROR: Al obtener datos de estadisticas:  Get(). Detalle: Mono.Data.Sqlite.SqliteException (0x80004005): SQLite error
+no such table: Estadisticas
+ERROR: Al cargar las estadisticas del archivo <path>.xml.sqlite: System.ArgumentNullException: Value cannot be null.
+```
+
+— and, worse, **the game does not self-heal it**: even after the player
+resaves, the `.sqlite` stays a 0-byte file with no table (confirmed: a
+save loaded with a missing `.sqlite` still had a 0-byte, tableless
+`.sqlite` after being saved back out by the game itself). A normal
+in-game save that never went through NSM gets a proper file with the
+`Estadisticas` table auto-created and populated. So: **any save NSM
+writes (fresh or edited) should ship a companion `.sqlite` with at least
+the empty schema** (`CREATE TABLE Estadisticas (Dia INTEGER, Hora INTEGER,
+Minuto INTEGER, Tipo INTEGER, Valor REAL)`, zero rows is fine) to avoid
+polluting the player's `Player.log` with these errors on every future
+load. Use Python's stdlib `sqlite3` module directly (no new dependency
+needed) — `nucleares_io.py` should gain a `write_stats_db(path)` helper
+called alongside `write_save_file()`. This is a good, small, concrete
+first fix to make once actual code changes start.
 
 ### The `.log` files
 Two of the seven saves had a companion `.log` (`00065`, `AUTOSAVE`) — these
@@ -684,44 +702,104 @@ Things worth reconsidering now that the real format is confirmed:
    these three need new parsing infrastructure — only new cheat methods
    that loop over the existing `state["objects"]` / `state["fluid_network"]`
    collections with the right tag filters.
-7. **The `.sqlite` companion file (§7) needs no changes for gameplay
-   cheats** — it's a display-only historical log with no effect on load.
-   Leave it alone unless a future feature specifically wants to touch the
-   in-game history graphs.
+7. **`nucleares_io.write_save_file` needs a companion-`.sqlite` writer —
+   confirmed bug, not just a nice-to-have (§7).** Every save NSM writes
+   today omits/breaks the `.sqlite`, and real-game testing (§10) confirmed
+   this causes a logged `SqliteException`/`ArgumentNullException` pair on
+   every future load of that save, which the game never self-heals. Fix:
+   write an empty `Estadisticas` table alongside every save NSM produces.
 8. **49 object classes are now catalogued (§3.2)**, with `Integridad`
    present on nearly all of them — a generic "repair everything" cheat can
    replace/supplement the current component-by-component one by looping
    `state["objects"]` once instead of hand-listing tags.
+9. **The real SCRAM trigger is likely a physical lever object, not the
+   internal flag** — see §10's confirmed findings: `PalancaSCRAM0`-`8`
+   (`PalancaMecanica`-class objects, one per control-rod bank) exist
+   separately from `CONTROL_NEW_CORE/_bancos/_scramSolicitado`, and only
+   the internal flag was tested so far.
 
 ---
-## 10. Pending experiments (awaiting real-game feedback)
+## 10. Round-1 experiment results (confirmed from real Player.log)
 
 Two hand-crafted test saves were built from `savegame_025_00064.xml` (Day
-20, reactor running) and handed to the maintainer to load in-game and
-report back `Player.log` + observed behavior, to convert the hypotheses
-above from "inferred" to "confirmed":
+20, reactor running) and handed to the maintainer to load in-game.
+`savegame_025_00070.xml` (the SCRAM-request test) came back along with
+`Player.log` and its own resaved `.xml`/`.sqlite`, and produced solid
+findings below. **`savegame_025_00071.xml`'s result was not usable** — the
+returned `savegame_025_00071.xml` in the reply turned out to be an
+unrelated, normal continued-play save the maintainer made afterward (same
+filename/slot number, completely different content — confirmed by
+checking for the specific object IDs the test had modified, which weren't
+present), not the damage/alarm test file. That experiment is still
+pending a real run.
 
-- **`savegame_025_00070.xml` — SCRAM request test.** Sets
-  `_scramSolicitado=true` on all 9 `CBancoSaveClass` entries under
-  `CONTROL_NEW_CORE/_bancos` and `MOTOR/HayParadaDeEmergencia=true`,
-  *without* touching any individual rod's `_posY`/`DestinoSolicitado`/
-  `_lastValorInsercion`. Question: does the game's own control logic drive
-  the rods in on load (confirming `_scramSolicitado` is the real command
-  flag rather than a passive log/telemetry flag), and do
-  `NUCLEO/XenonConcentracion`/`ReactividadXenon`/`CalorGenerado` respond
-  the way §2.1 predicts afterward?
-- **`savegame_025_00071.xml` — alarm/damage correlation test.** Sets
-  `Integridad=5` on exactly one `BombaDeAgua` (id
-  `BC_2_GENERADOR_CIRCULACION`), one `TurbinaElectrica` (id
-  `GE_Generador01`), and one `Resistor` (id `RESISTOR_0`) — nothing else
-  changed. Question: which `CONFIG_ALARMAS` entries actually go
-  `IsActiva=true`/populate `Actual` for each (testing the "`Actual` <
-  `Minimo`" integrity-alarm hypothesis from §6), and does
-  `MANTENIMIENTO/Elementos` grow a matching new job for each damaged
-  object?
+### Confirmed: NSM must write a companion `.sqlite`, and the game never self-heals a missing one
+`savegame_025_00070.xml` was sent without a matching `.sqlite`. On load,
+`Player.log` recorded (both non-fatal, session continued):
+```
+185.1191: ERROR: Al obtener datos de estadisticas:  Get(). Detalle: Mono.Data.Sqlite.SqliteException (0x80004005): SQLite error
+no such table: Estadisticas
+185.1191: ERROR: Al cargar las estadisticas del archivo .../savegame_025_00070.xml.sqlite: System.ArgumentNullException: Value cannot be null.
+```
+The game auto-created a 0-byte `savegame_025_00070.xml.sqlite` to satisfy
+the file-open call, hit the "no such table" error, logged it, and moved
+on with empty stats (`Finalizado el cargado de la base de datos de
+estadisticas` right after). Critically: **even after the player resaved
+this file in-game, the returned `.sqlite` was still 0 bytes with no
+table** — the game does not repair/recreate it on save, only on a
+first-ever `CREATE`. For comparison, the maintainer's own normal
+`savegame_025_00071.xml.sqlite` (an ordinary continued-play save, not one
+of the test files) had a proper `Estadisticas` table with 75 rows. This
+promotes §7's recommendation from "nice to have" to **confirmed
+required**: every save NSM writes needs a companion `.sqlite` with at
+least the empty schema, or every future load of that save logs these
+errors forever.
 
-**Once feedback comes back, update:** §6's `CONFIG_ALARMAS` writeup (which
-object(s) feed `Actual` per sector), §2.3/§3.1's control-rod section (real
-vs. hypothesized SCRAM mechanics), and this section (mark resolved,
-replace inference language with confirmed language) — then delete this
-section once both are folded into their proper homes.
+### Confirmed: game version in use is V2.2.25.221
+`Player.log` line: `AWAKE | MAIN | Version V 2.2.25.221` — one patch newer
+than the "untested, probably works" `V2.2.25.218` guess in
+`tested_versions.md`. Worth updating that file once this round of changes
+lands.
+
+### New discovery: the physical SCRAM lever is a separate `PalancaMecanica` object per bank, not just the internal flag
+Searching `Player.log` for the save event surfaced **9 objects literally
+named `PalancaSCRAM0` through `PalancaSCRAM8`**, one per control-rod bank,
+of class `PalancaMecanica` (a type-C object per §3 — 4 pipe fields, last
+field a bare `True`/`False` literal, *not* an XML payload):
+```
+<PalancaMecanica>PalancaSCRAM8|PalancaSCRAM8|PalancaMecanica|False</PalancaMecanica>
+```
+All 9 came back `False` (lever not pulled) in the resaved file, while the
+`_scramSolicitado=true` flags this experiment set on all 9
+`CONTROL_NEW_CORE/_bancos/CBancoSaveClass` entries **persisted unchanged
+(`true`) through the load-and-resave** — the game neither consumed nor
+acted on that internal flag by itself. This strongly suggests
+**`_scramSolicitado` is a request/intent flag the physical lever object
+sets when pulled by the player or the AO assistant, not something a save
+editor can trigger by itself** — driving the actual rod-insertion
+behavior likely requires flipping these `PalancaSCRAM<N>` `PalancaMecanica`
+objects to `True` instead (or in addition). Added to the §3.2 catalog.
+
+### Inconclusive: whether either flag actually drives rod movement
+Two confounding factors mean this experiment can't yet rule that in or
+out: (1) `Player.log` shows `Se ha pausado la historia` ("the story/sim
+has been paused") logged 4 times through the session, and (2) the resaved
+file's `AMBIENTE/{Dias,Hora,Minuto}` (`20, 5, 44`) is **byte-identical**
+to the original — meaning essentially no in-game simulation time elapsed
+between load and save. `NUCLEO/XenonConcentracion`, `CalorGenerado`,
+`ReactividadXenon`, and `Estado` (still `REACTIVO`) were all also
+unchanged, consistent with "no ticks ran" rather than "the flag has no
+effect." This is why the maintainer "didn't notice anything different" —
+there was no time for anything to happen either way, not necessarily
+because SCRAM does nothing.
+
+### Next experiment (round 2)
+Build a save that sets **both** `_scramSolicitado=true` on all banks
+**and** all 9 `PalancaSCRAM<N>` objects to `True`, and ask the maintainer
+to load it and let the game run un-paused for at least a few in-game
+minutes (watch `AMBIENTE/Minuto` advance, or just play normally for a
+minute or two) before saving, so there's actually simulated time for the
+rods to move in. Also re-run the alarm/damage test (§7-era `00071`) since
+the first attempt's result got lost to an unrelated save in the same
+slot — best to use a distinctive save-slot number unlikely to collide
+with normal play (e.g. `00099`) next time.
