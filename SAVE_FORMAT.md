@@ -843,16 +843,20 @@ additional companion state (a timer, an edge-trigger flag, something
 `_scramSolicitado` that was `false` in every observed save — might gate)
 that a save edit touching only `_scramSolicitado` doesn't reproduce.
 
-### Next experiment (round 3): stop guessing blind, diff a real manual SCRAM instead
-Two rounds of edit-then-load have shown the request registers but stalls
-before completion, and further blind field-guessing (e.g. trying
-`_directo=true`) has a low hit rate against an 872-field save with no
-source access. The higher-value next step is an **empirical diff**: from
-an unmodified, currently-running save (reactor `REACTIVO`), physically
-pull one real SCRAM lever in-game, save *immediately* afterward (within
-the same minute, so nothing else confounds the diff), and send both the
-pre-pull save and the post-pull save/Player.log. Diffing those two saves
-field-by-field will show exactly which values the game itself changes to
-execute a real SCRAM — turning this from inference into a direct read of
-the mechanism, and telling us precisely what NSM needs to write to
-replicate it.
+### Round 3 result: closed — this is a genuine in-game bug, not an NSM/save-editing problem
+Before running the planned "diff a real manual pull" experiment, the
+maintainer tested the control path directly in-game on their own: **the
+physical SCRAM lever/button did nothing even when pressed repeatedly by
+hand**, no save editing involved. That rules out every hypothesis above
+about `_directo` or some other companion field a save edit failed to set —
+there's no companion field to find, because the game's own control-rod
+drop mechanic doesn't complete for either input path in
+**V2.2.25.221**. This matches `tested_versions.md`'s existing note that
+this version's `NUCLEO`/`CONTROL_NEW_CORE` reactor model is only
+partially working — SCRAM is now a confirmed instance of that, not a gap
+in NSM's understanding of the save format. `_scramSolicitado` and the
+`PalancaSCRAM<N>`/`PalancaMecanica_Frenos` objects documented above are
+still believed correct as *the* mechanism (the log evidence in round 2
+shows the game's own code reads and acts on them) — they just don't
+finish executing in this game build. No further SCRAM experiments planned
+unless a future Nucleares patch changes this.
