@@ -343,6 +343,10 @@ class SaveMemoryManager:
             "fluid_network_node": None,   # The raw master XML node for write-back
             "objects": [],
             "switches": [],                # Type-C objetos entries: plain True/False literal, no XML payload
+            "maintenance": None,           # Decoded MANTENIMIENTO element (mutable in-place)
+            "maintenance_node": None,      # The raw master XML node for write-back
+            "alarms": None,                # Decoded CONFIG_ALARMAS element (mutable in-place)
+            "alarms_node": None,           # The raw master XML node for write-back
         }
 
         # Non-fatal problems hit while parsing (e.g. a single malformed
@@ -423,6 +427,16 @@ class SaveMemoryManager:
                 self.state["fluid_network_node"] = None
                 self.parse_warnings.append(f"Could not decode fluid network: {exc}")
 
+        # 3b. MANTENIMIENTO — the finer-grained per-part wear/maintenance-job
+        #     tracker (parallel to, and not otherwise reachable from, the
+        #     per-component Integridad fields; see SAVE_FORMAT.md §6/§9).
+        self.state["maintenance_node"], self.state["maintenance"] = \
+            self._decode_singleton_top_level("MANTENIMIENTO")
+
+        # 3c. CONFIG_ALARMAS — the alarm-threshold/live-status table.
+        self.state["alarms_node"], self.state["alarms"] = \
+            self._decode_singleton_top_level("CONFIG_ALARMAS")
+
         # 4. Objects — pipe-separated strings. Two shapes are mapped:
         #      - whose LAST segment is an HTML-escaped XML payload (fuel
         #        blocks, control rods, pumps, turbines, ...) -> state["objects"]
@@ -463,6 +477,23 @@ class SaveMemoryManager:
                         "class": parts[2],
                     })
 
+    def _decode_singleton_top_level(self, tag: str):
+        """
+        Find and decode a single top-level payload node by tag (e.g.
+        ``MANTENIMIENTO``, ``CONFIG_ALARMAS``) the same way the fluid
+        network is handled. Returns ``(node, decoded_element)``, or
+        ``(None, None)`` if the tag is absent or fails to decode (recorded
+        in ``self.parse_warnings``).
+        """
+        node = self.master_root.find(f".//{tag}")
+        if node is None or not node.text:
+            return None, None
+        try:
+            return node, _html_decode(node.text)
+        except (ValueError, ET.ParseError) as exc:
+            self.parse_warnings.append(f"Could not decode {tag}: {exc}")
+            return None, None
+
     # ------------------------------------------------------------------
     # COMMIT
     # ------------------------------------------------------------------
@@ -487,6 +518,18 @@ class SaveMemoryManager:
         if dif_node is not None and dif is not None:
             dif_node.text = encode_payload(dif)
 
+        # Maintenance job list
+        maint_node = self.state["maintenance_node"]
+        maint = self.state["maintenance"]
+        if maint_node is not None and maint is not None:
+            maint_node.text = encode_payload(maint)
+
+        # Alarm config/live-status table
+        alarms_node = self.state["alarms_node"]
+        alarms = self.state["alarms"]
+        if alarms_node is not None and alarms is not None:
+            alarms_node.text = encode_payload(alarms)
+
         # Objects
         for obj_data in self.state["objects"]:
             encoded_xml = encode_payload(obj_data["inner_xml"])
@@ -510,6 +553,10 @@ class SaveMemoryManager:
         dif = self.state["fluid_network"]
         if dif is not None:
             mapping["[Fluid] DISTRIBUCION_INTERNA_FLUIDOS"] = dif
+        if self.state["maintenance"] is not None:
+            mapping["[Top] MANTENIMIENTO"] = self.state["maintenance"]
+        if self.state["alarms"] is not None:
+            mapping["[Top] CONFIG_ALARMAS"] = self.state["alarms"]
         for obj in self.state["objects"]:
             obj_id = obj["parts_prefix"][0] if obj["parts_prefix"] else "unknown"
             mapping[f"[Object] {obj_id}"] = obj["inner_xml"]
@@ -593,10 +640,16 @@ class SaveMemoryManager:
 
     def repair_all_objects(self):
         """
-        Repair every object, component, and fluid-network pipe in the save.
+        Repair every object, control rod, component, fluid-network pipe,
+        maintenance job, and alarm in the save — as close to "fix
+        everything" as the confirmed field set allows.
 
-        Target values are taken from the ``REPAIR_DEFAULTS`` database tag when
-        present, falling back to the built-in safe defaults shown below.
+        Target values are taken from the ``REPAIR_DEFAULTS`` database tag
+        when present, falling back to the built-in safe defaults shown
+        below. This intentionally covers *damage/wear* state only, not
+        consumable resources (fuel, coolant, boron) — those are refilled by
+        the separate ``max_backup_generators``/``flood_reserves`` cheats so
+        "repair" and "refuel" stay distinct actions.
 
         REPAIR_DEFAULTS keys
         --------------------
@@ -607,11 +660,13 @@ class SaveMemoryManager:
         ``desgaste``/``porcentaje_roto`` via a ``_valoresFloat`` dict lookup
         that (confirmed by exhaustively indexing every field across 7 real
         saves, see SAVE_FORMAT.md §1) never matches anything in the current
-        save format — those two calls were silent no-ops. They've been
-        replaced with resets of the real damage-indicator fields objects
-        actually carry: ``_nivelDanoActual`` (damage level, healthy = "NADA"),
-        ``IsDestruida`` (destroyed flag), ``SelloRoto`` (fuel block seal),
-        and ``OxidoAcumulado`` (pump rust accumulation).
+        save format — those two calls were silent no-ops, and control rods'
+        own ``_integridad`` field (lowercase, unlike everything else's
+        ``Integridad``) was missed entirely. Both are fixed below, along
+        with extending coverage to the fluid network's non-Integridad
+        damage fields, the MANTENIMIENTO job list (a second, finer-grained
+        wear tracker parallel to the per-component fields — see
+        SAVE_FORMAT.md §6/§9), and CONFIG_ALARMAS' live alarm status.
         """
         # ── resolve target values (DB → hardcoded fallback) ──
         tgt_integridad  = self._db.get("REPAIR_DEFAULTS", "Integridad", 100.0)
@@ -620,17 +675,24 @@ class SaveMemoryManager:
         tgt_integridad_str  = self._db.get_as_str("REPAIR_DEFAULTS", "Integridad",  str(tgt_integridad))
         tgt_temperatura_str = self._db.get_as_str("REPAIR_DEFAULTS", "temperatura", str(tgt_temperatura))
 
+        def integridad_ok(text):
+            return text in (tgt_integridad_str, str(int(tgt_integridad)))
+
         count = 0
 
-        # 1. Objects with XML payloads (fuel rods, pumps, turbines, valves, ...)
+        # 1. Objects with XML payloads (fuel rods, control rods, pumps,
+        #    turbines, valves, resistors, transformers, cranes, ...)
         for obj in self.state["objects"]:
             inner = obj["inner_xml"]
             repaired = False
 
-            elem = inner.find(".//Integridad")
-            if elem is not None and elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
-                elem.text = tgt_integridad_str
-                repaired = True
+            # Control rods use a lowercase "_integridad", everything else
+            # uses "Integridad" -- check both.
+            for integ_tag in ("Integridad", "_integridad"):
+                elem = inner.find(f".//{integ_tag}")
+                if elem is not None and not integridad_ok(elem.text):
+                    elem.text = tgt_integridad_str
+                    repaired = True
 
             elem = inner.find(".//Temperatura")
             if elem is not None and elem.text != tgt_temperatura_str:
@@ -642,15 +704,11 @@ class SaveMemoryManager:
                 elem.text = "NADA"
                 repaired = True
 
-            elem = inner.find(".//IsDestruida")
-            if elem is not None and elem.text == "true":
-                elem.text = "false"
-                repaired = True
-
-            elem = inner.find(".//SelloRoto")
-            if elem is not None and elem.text == "true":
-                elem.text = "false"
-                repaired = True
+            for bool_tag in ("IsDestruida", "SelloRoto", "IsAtascada", "IsEnCorto"):
+                elem = inner.find(f".//{bool_tag}")
+                if elem is not None and elem.text == "true":
+                    elem.text = "false"
+                    repaired = True
 
             elem = inner.find(".//OxidoAcumulado")
             if elem is not None and elem.text != "0":
@@ -667,13 +725,14 @@ class SaveMemoryManager:
 
             for tag in ["Integridad", "IntegridadCalentadores", "IntegridadReliefTank"]:
                 for elem in inner.findall(f".//{tag}"):
-                    if elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
+                    if not integridad_ok(elem.text):
                         elem.text = tgt_integridad_str
                         repaired = True
 
             for tag in ["RequiereMantenimiento", "IsContaminado",
                         "DesactivadoPorFaltaDeSuministro",
-                        "RequiereMantenimientoCalentadores"]:
+                        "RequiereMantenimientoCalentadores",
+                        "IsDestruida", "IsAtascada"]:
                 for elem in inner.findall(f".//{tag}"):
                     if elem.text == "true":
                         elem.text = "false"
@@ -686,8 +745,70 @@ class SaveMemoryManager:
         dif = self.state["fluid_network"]
         if dif is not None:
             for elem in dif.findall(".//Integridad"):
-                if elem.text not in (tgt_integridad_str, str(int(tgt_integridad))):
+                if not integridad_ok(elem.text):
                     elem.text = tgt_integridad_str
+                    count += 1
+            for elem in dif.findall(".//PerdidaEfectivaDeFluido"):
+                if elem.text != "0":
+                    elem.text = "0"
+                    count += 1
+            for tag in ("OxidoPresente", "fluidoPerdido"):
+                for elem in dif.findall(f".//{tag}"):
+                    if elem.text == "true":
+                        elem.text = "false"
+                        count += 1
+
+        # 4. MANTENIMIENTO — the per-part maintenance-job tracker. Clears
+        #    the damage/contamination readings on every job entry and every
+        #    individual control-rod entry in its DatosBDC sub-list.
+        maint = self.state["maintenance"]
+        if maint is not None:
+            for elem_node in maint.findall(".//CElemento"):
+                repaired = False
+                for tag in ("Integridad", "Desgaste"):
+                    e = elem_node.find(tag)
+                    if e is not None and not integridad_ok(e.text) and e.text != "0":
+                        # Integridad -> 100, Desgaste (wear) -> 0
+                        e.text = tgt_integridad_str if tag == "Integridad" else "0"
+                        repaired = True
+                for tag in ("Oxido", "PresenciaYodo", "PresenciaXenon"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text != "0":
+                        e.text = "0"
+                        repaired = True
+                for tag in ("Contaminado", "RequiereMantenimiento", "Desalineado"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text == "true":
+                        e.text = "false"
+                        repaired = True
+                e = elem_node.find("MotivoDelFallo")
+                if e is not None and e.text != "NINGUNO":
+                    e.text = "NINGUNO"
+                    repaired = True
+                if repaired:
+                    count += 1
+            for elem_node in maint.findall(".//DatosBDC/CDatosBDC"):
+                e = elem_node.find("Integridad")
+                if e is not None and not integridad_ok(e.text):
+                    e.text = tgt_integridad_str
+                    count += 1
+
+        # 5. CONFIG_ALARMAS — clear every live alarm now that the
+        #    underlying damage has been repaired.
+        alarms = self.state["alarms"]
+        if alarms is not None:
+            for elem_node in alarms.findall(".//CConfigAlarmas"):
+                repaired = False
+                actual = elem_node.find("Actual")
+                if actual is not None and actual.text != "0":
+                    actual.text = "0"
+                    repaired = True
+                for tag in ("IsActiva", "IsActualizada"):
+                    e = elem_node.find(tag)
+                    if e is not None and e.text == "true":
+                        e.text = "false"
+                        repaired = True
+                if repaired:
                     count += 1
 
         return f"Fully repaired {count} reactor objects and systems."
