@@ -337,6 +337,69 @@ inserted position) or "withdraw all rods" cheat — iterate
 whose class is `BarraDeControl`) and skip the ones with
 `_datosPos_IdBanco == -1` (unassigned spares).
 
+### 3.2 Full `<objetos>` class catalog
+
+A comprehensive field-level index was built by walking **every** decoded
+element in all 7 real saves and recording every distinct field path with
+up to 40 sample values each. It's committed at
+[`reference/field_index.json`](reference/field_index.json) (~1555 unique
+field paths, keyed `componentes/<TAG>/...`, `objetos/<CLASS>/...`, or
+`top/<TAG>/...`) — treat it as the canonical, exhaustive companion to this
+document; anything not narratively described below or elsewhere in this
+file can be looked up there directly (path → observed sample values +
+which save files it came from).
+
+That walk surfaced **49 distinct `<objetos>` classes** (field 2 of the
+pipe record), far more than the two (`BloqueCombustible`, `BarraDeControl`)
+covered in detail above. Every powered/physical piece of plant equipment
+in the game is an individually addressable object with its own
+`Integridad`, and most also carry `IsDestruida`, `Aplicados/Tipos` (a list
+of upgrade/modifier tags — `AUMENTO_POTENCIA`, `AUMENTO_RESISTENCIA`,
+`REDUCCION_CONSUMO`, `MEJORA_DISIPACION`, `AUMENTO_ABSORCION`,
+`REDUCCION_TIEMPO`), and the same
+`_fechaInicioConstruccion_*`/`_fechaFinalConstruccion_*`/`_isEnConstruccion`/
+`_horasDuracionConstruccion` block (whether the part is mid-upgrade-build).
+
+| Class | Real-world part | Key controllable fields |
+|---|---|---|
+| `BarraDeControl` | Control rod (see §3.1) | `_lastValorInsercion`, `DestinoSolicitado`, `_posY`, `_integridad`, `_reactividad` |
+| `BloqueCombustible` | Fuel assembly block (see §3-B) | `Integridad`, `Cantidad`, `SelloRoto`, `Temperatura`, `Ubicacion` |
+| `BombaDeAgua` | Water/coolant pump | `Integridad`, `EncendidoSolicitado`, `VelocidadEstablecida`, `Presion`, `Sector`, `Tipo`/`Elemento`/`Clase`, `IsDestruida`, `OxidoAcumulado` |
+| `BombaDeVacio` | Vacuum pump (condenser) | `Integridad`, `_encendidoSolicitado`, `IsEnergiaSuficiente`, `NivelDanoActual` |
+| `TurbinaGeneradora` | Steam turbine (mechanical side) | `Integridad`, `Torque`, `FluidoInterno` (internal steam/liquid content — same `_liquidos`/`_gases`/`_presiones` shape as §5), `IsDestruida` |
+| `TurbinaElectrica` | Turbine generator (electrical side) | `Integridad`, `Torque`, `_lastRPM`, `_velocidadRotacion`, `_lucesGenerando`, `IsDestruida` |
+| `GrupoElectrogeno` | Backup diesel generator unit (object form of `CElectrogeno`, §2.2) | `Integridad`, `EstadoInterno`, `_electrogenoEnMotorLogico/{Combustible,Estado,PotenciaGenerada_kW,IsContaminado}` |
+| `Resistor` | Electrical resistor bank | `Integridad`, `IsDestruida`, `Temperatura`, `PalancaByPass_Valor`/`PalancaConectado_Valor`, `MantenimientoRequeridoDias` |
+| `Transformador` | Transformer | `Integridad`, `IsDestruida`, `_lastTransformacion`, `_lastVoltage` |
+| `MotorBDC` | Control-rod drive motor (one per bank) | `Integridad`, `IsEncendido`, `_fluidoHidraulico`, `_watts` |
+| `PowerHub` | Electrical distribution hub | `EnergiaExterna`, `_energia` |
+| `PropiedadesCable` | A power cable/wire segment | `Energia`, `EnergiaDisponible`, `EnergiaSolicitada`, `IsEnCorto` (short-circuit!), `IsInterruptorEncendido` |
+| `Valvula` | Valve | `Apertura` (open %), `Integridad`, `IsAtascada` (stuck!), `IsBypass`, `_aperturaTarget` |
+| `AirEjector` | Air ejector (condenser vacuum system) | `Integridad`, `_lastMinutoCavitacion` |
+| `Aspersor` | Sprinkler (fire suppression) | `IsActivo`, `IsSensorActivo`, `DuracionTanque` |
+| `ColumnaIones` | Ion-exchange column (water purification) | `Integridad`, `CantidadAcumulada`, `LastFiltrado_*` |
+| `ControlCrane` | Overhead crane (fuel handling) | `IsActivo`, `IsPinzaAbierta`, `ObjetoEnPinza` (currently-held object id) |
+| `PinzaReparadora` | Repair claw/tool | *(no XML payload observed — likely type A/C)* |
+| `Soldadora` | Welder tool | *(no XML payload observed)* |
+| `MedidorBalance` | Balance/analog meter (UI gauge prop) | `MultiplicadorEscalaActual` |
+| `Synchronoscope` | Turbine sync scope (grid tie-in instrument) | `_breakerAbierto`, `_velSync`, `_velocidadBus`, `_velocidadGen` |
+| `GraficoDeBarras` / `GraficoHistorico` | In-world UI bar/history graph props | `float`/`int` history arrays, `_valorMax`/`_valorMin` — display only |
+| `VideoVigilancia` | CCTV camera panel | `IsEncendidoSolicitado`, `IsMulticamara` |
+| `PortonEmergencia` | Emergency gate/door | `Estado`, `_aperturaSolicitada`, `_cierreSolicitado` |
+| `PuertaTipoEscotilla` | Hatch-type door | `Estado` |
+| `RadiacionArea` | Radiation dosimeter/area sensor | `Radiacion` |
+| `SteamGenerator` | Steam generator equipment object (object form mirroring `EVAPORADOR`) | `Clase`, `Elemento`, construction fields |
+| `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `InterruptorTecla`, `PalancaMecanica`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
+
+This confirms **every functional piece of plant equipment** (pumps,
+turbines, generators, resistors, transformers, valves, cranes, control-rod
+motors) is reachable through the same `state["objects"]` list
+`repair_all_objects`/`flood_reserves` already iterate — a truly general
+"repair everything" cheat can now be written as one loop over
+`state["objects"]` that sets `Integridad`/`IsDestruida`/`_nivelDanoActual`
+wherever they're present, rather than hand-listing components one at a
+time.
+
 ---
 ## 4. Player / progression data
 
@@ -455,7 +518,25 @@ the data worth exposing later: `FUEL` (in containers), `VAPOR` (gas).
 - **`CONFIG_ALARMAS`** — the alarm threshold config: 69× `CConfigAlarmas`
   {`Sector`, `Alarma` (code like `AL002`), `Minimo`/`Maximo`/`Actual`,
   `Descripcion`, `IsActiva`}. A "disable all alarms" or "widen all alarm
-  thresholds" cheat would live here.
+  thresholds" cheat would live here. Across all 7 saves this indexes to
+  **9 sectors** (`BARRASCONTROL`, `COMBUSTIBLE`, `CONDENSADOR`,
+  `EVAPORADOR`, `GENERADOR`, `NUCLEO`, `PRESURIZADOR`, `REFRIGERANTE`,
+  `SUMINISTROINTERNO`) each with its own family of alarm codes (see
+  `reference/field_index.json` for the fuller sample list — 40+ distinct
+  codes observed, e.g. `AL001`-`AL008` generic temp/integrity alarms,
+  `AL023_<N>` per-turbine damage, `AL030`-`AL035_<N>` per-steam-generator
+  variants, `TANQUE_RETENCION_VOLUMEN_BAJO`). Inspecting the `REFRIGERANTE`
+  sector's rows shows the pattern clearly: `AL005` LOW INTEGRITY has
+  `Minimo=60`, `AL006` CRITICAL INTEGRITY has `Minimo=20` (both
+  `Maximo=100`) — i.e. **integrity-type alarms fire when the live value
+  drops below `Minimo`**, while temperature-type alarms (`AL001`-`AL003`,
+  `Minimo=0`) presumably fire when `Actual` exceeds `Maximo` instead.
+  `Actual` is a live-updated mirror of some tracked object/component's
+  real value, refreshed by the game each tick (`IsActualizada` marks
+  whether it's stale). **Unconfirmed**: exactly which object feeds each
+  `Actual` (probably the worst-affected instance of that Sector's
+  equipment) — two test saves (`savegame_025_00070.xml`/`00071.xml`, see
+  §10) were built specifically to observe this in `Player.log`.
 - **`TRANSFORMACION`** — grid tie-in / external power sale state
   (`EnergiaEntregadaExterior`, `IsEntregandoAlExterior`).
 - **`COMUNICACIONES`** — in-game messaging/dispatch state (mission-control
@@ -607,3 +688,40 @@ Things worth reconsidering now that the real format is confirmed:
    cheats** — it's a display-only historical log with no effect on load.
    Leave it alone unless a future feature specifically wants to touch the
    in-game history graphs.
+8. **49 object classes are now catalogued (§3.2)**, with `Integridad`
+   present on nearly all of them — a generic "repair everything" cheat can
+   replace/supplement the current component-by-component one by looping
+   `state["objects"]` once instead of hand-listing tags.
+
+---
+## 10. Pending experiments (awaiting real-game feedback)
+
+Two hand-crafted test saves were built from `savegame_025_00064.xml` (Day
+20, reactor running) and handed to the maintainer to load in-game and
+report back `Player.log` + observed behavior, to convert the hypotheses
+above from "inferred" to "confirmed":
+
+- **`savegame_025_00070.xml` — SCRAM request test.** Sets
+  `_scramSolicitado=true` on all 9 `CBancoSaveClass` entries under
+  `CONTROL_NEW_CORE/_bancos` and `MOTOR/HayParadaDeEmergencia=true`,
+  *without* touching any individual rod's `_posY`/`DestinoSolicitado`/
+  `_lastValorInsercion`. Question: does the game's own control logic drive
+  the rods in on load (confirming `_scramSolicitado` is the real command
+  flag rather than a passive log/telemetry flag), and do
+  `NUCLEO/XenonConcentracion`/`ReactividadXenon`/`CalorGenerado` respond
+  the way §2.1 predicts afterward?
+- **`savegame_025_00071.xml` — alarm/damage correlation test.** Sets
+  `Integridad=5` on exactly one `BombaDeAgua` (id
+  `BC_2_GENERADOR_CIRCULACION`), one `TurbinaElectrica` (id
+  `GE_Generador01`), and one `Resistor` (id `RESISTOR_0`) — nothing else
+  changed. Question: which `CONFIG_ALARMAS` entries actually go
+  `IsActiva=true`/populate `Actual` for each (testing the "`Actual` <
+  `Minimo`" integrity-alarm hypothesis from §6), and does
+  `MANTENIMIENTO/Elementos` grow a matching new job for each damaged
+  object?
+
+**Once feedback comes back, update:** §6's `CONFIG_ALARMAS` writeup (which
+object(s) feed `Actual` per sector), §2.3/§3.1's control-rod section (real
+vs. hypothesized SCRAM mechanics), and this section (mark resolved,
+replace inference language with confirmed language) — then delete this
+section once both are folded into their proper homes.
