@@ -920,8 +920,63 @@ current material and failing because that source reference is null for
 these two objects specifically — logged as a non-fatal error, not itself
 implicated in the hang (only 6 occurrences total out of ~387 damaged
 objects, and the game kept loading and running normally afterward for
-another ~9 seconds). Still worth tracking: **a maximally-damaged
-`savegame_025_00098.xml` (no suit change) was rebuilt and sent separately
-for isolated testing**, to determine whether mass-damaging every object's
-`Integridad` to 1% is safe on its own, independent of the suit issue
-above. Result pending.
+another ~9 seconds).
+
+### Both fixes confirmed good in re-tests, with extensive bonus validation
+
+**`00097.xml` (suit only, object removed from `<objetos>`)**: loaded and
+played cleanly for 153 real seconds with a normal shutdown at the end —
+no `CTraje` exception, no hang. The maintainer reported no change other
+than correctly wearing the suit. The only `NullReferenceException` left
+in that session (`CAmbiente+ActivandoLucesAlarmaAmbiental`, an ambient
+alarm-light coroutine) is unrelated to any NSM edit — it's a pre-existing
+engine bug that fires whenever the ambient alarm toggles and doesn't
+affect anything else.
+
+**`00098.xml` (mass damage only)** ran for **1362 real seconds (~23
+minutes)** with no hang and a normal shutdown — confirms mass-damaging
+`Integridad` to 1% across ~387 objects is, on its own, safe to load. The
+444 `TexturaQuemada`/`NullReferenceException` log lines over that session
+are the same harmless ambient-light bug plus more `TexturaQuemada` misses
+(more damaged objects rendered over a longer session), never fatal.
+
+Screenshots and Player.log from that session **confirm several field
+mappings directly against the game's own UI**, upgrading them from
+inferred to confirmed:
+- The in-game **Maintenance Report** screen for `NUCLEO` showed
+  `Integrity: 001%` and control rod `Overall Integrity: 000%` /
+  `Absorption Capacity: 0%` on every rod in every bank — exact matches for
+  the `Integridad`/`_integridad` values this test set, confirming both
+  field names map to displayed "Integrity" as documented in §2.1/§3.1.
+  It also states **"Damaged rods cannot be repaired by AO: they must be
+  replaced"** — an in-game gameplay limitation that direct save-editing
+  (as `repair_all_objects` does) legitimately bypasses.
+- Damaging `MANTENIMIENTO`'s `RequiereMantenimiento` flags plant-wide
+  triggered a previously-undocumented game mechanic: **"Frozen Time"**
+  (time stops, "consuming Prestige Points" i.e. `Puntos`/money, until it
+  runs out), with the AO assistant explicitly saying *"The plant has not
+  been operational for too long... the connections need maintenance, and
+  have not received it."* — confirms `MANTENIMIENTO`/`RequiereMantenimiento`
+  is read and consequential, not just a display flag.
+- The core visibly went into a real meltdown state (`Play efecto meltdown
+  en el core: True` in `Player.log`) with the reactor core window
+  rendering a glowing green fog effect, an `EMERGENCY: REACTOR IS IN
+  DANGEROUS CONFIGURATION` banner, and the in-game STATUS screen showing
+  `CORE T: 2592°C` (well above the `999` this test set for individual
+  `Temperature` fields — the game's own simulation escalated it further
+  from there, consistent with coolant pumps/circulation also being
+  damaged to 0% in the same test). Multiple turbine generators (`TG_0`,
+  `TG_1`, `TG_2`) also explicitly logged `Explosión de TG_N`.
+- Fuel bay hatches refused to open with repeated `CAUTION: CORE MUST BE
+  SECURE AND IN SHUTDOWN MODE` — consistent with §10's confirmed finding
+  that this game version's reactor can't actually be shut down, so
+  "replace the damaged rods" isn't achievable through normal play at all
+  right now, only through a save editor.
+- Player health stayed at 100 throughout, and no player-death/game-over
+  was logged, despite the meltdown — radiation exposure apparently
+  requires proximity the maintainer didn't approach.
+
+Net result: **mass-damaging objects via save edit is safe and produces
+exactly the in-game consequences the field names promised** — this is a
+strong overall validation of the object/component field catalog in §2-§3
+and the `repair_all_objects`/damage-testing methodology.
