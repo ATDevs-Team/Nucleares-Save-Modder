@@ -860,3 +860,68 @@ still believed correct as *the* mechanism (the log evidence in round 2
 shows the game's own code reads and acts on them) — they just don't
 finish executing in this game build. No further SCRAM experiments planned
 unless a future Nucleares patch changes this.
+
+---
+## 11. Confirmed hazard: representing a worn hazmat suit by editing `<objetos>` state alone crashes/hangs the game
+
+**`JUGADOR/TRAJE_LlevaPuesto`+`TRAJE_Nombre` (§4) must not be set to
+"worn" while the named `TrajeProtector` object is still left present in
+`<objetos>`.** Confirmed by a real crash: a save was built from `00064`
+with `TRAJE_LlevaPuesto=true`/`TRAJE_Nombre=TRAJE_PROTECTOR_4` set, but
+the `TRAJE_PROTECTOR_4` object was (mistakenly, at the time) left in its
+`<objetos>` container entry unchanged, rather than removed the way a real
+"suit equipped" save represents it (§4 already documented that `00061`,
+a real save made while actually wearing the suit, has **no**
+`TRAJE_PROTECTOR_4` entry in `<objetos>` at all — this was known but not
+yet acted on before this test).
+
+Loading that save produced, at 19.7s into the load sequence:
+```
+NullReferenceException: Object reference not set to an instance of an object
+  at JugadorLocal+CTraje.Load (System.Boolean llevaPuesto, System.String nombre) [0x0000e]
+  at JugadorLocal.LoadClass (JugadorLocal+CSaveClass saved) [0x000ac]
+  at Ficheros+<>c__DisplayClass141_0+<<CargarProgreso>g__Cargando|0>d.MoveNext () [0x00efb]
+```
+— i.e. the game's own player-load code (`JugadorLocal+CTraje.Load`,
+literally "is a suit worn / which one") threw trying to resolve the named
+suit, almost certainly because it expected to find/attach the referenced
+world object and got an inconsistent state instead (flagged worn, but
+still sitting in its container as a separate object). The session then
+went completely silent in `Player.log` for **~185 seconds** (last normal
+log line at 29s, next line at 214s is the game's own shutdown sequence,
+which only appears because the player had to force-close the process) —
+a real hang/black-screen, not a quick crash-to-desktop. This was the same
+save that also had ~387 objects mass-damaged to 1% integrity in the same
+load (see below); the suit `NullReferenceException` is considered the
+more likely trigger for the hang specifically, since it's a hard exception
+inside the player-load coroutine itself (leaving the coroutine's
+downstream state — camera/room setup depends on it completing — in an
+unknown condition), versus the handful of unrelated, separately-logged,
+non-fatal rendering errors described below.
+
+**Fix, applied and re-sent as a corrected test (unconfirmed pending
+re-test):** remove the object's `<objetos>` entry entirely when marking a
+suit as worn (mirroring the real save's own representation), rather than
+just setting the two `JUGADOR` flags and leaving the object in place. If
+a future "make the player wear a suit" cheat is added to NSM, it must
+perform both steps together.
+
+### Separate, lower-severity finding from the same crashed session: `TexturaQuemada.SetDestruido` can throw when an object is force-damaged
+The same `Player.log` also showed 6 occurrences (2 distinct objects,
+"Anillo" and "Tubo (4)", 3 repeats each) of:
+```
+ERROR: Al cambiar material por destruccion en Anillo: System.ArgumentNullException: Value cannot be null.
+  at UnityEngine.Material..ctor (UnityEngine.Material source)
+  at TexturaQuemada.SetDestruido (System.Boolean valor)
+```
+This is the game's damage-visual system (`TexturaQuemada`, "burned
+texture") trying to clone a "burned" material variant from the object's
+current material and failing because that source reference is null for
+these two objects specifically — logged as a non-fatal error, not itself
+implicated in the hang (only 6 occurrences total out of ~387 damaged
+objects, and the game kept loading and running normally afterward for
+another ~9 seconds). Still worth tracking: **a maximally-damaged
+`savegame_025_00098.xml` (no suit change) was rebuilt and sent separately
+for isolated testing**, to determine whether mass-damaging every object's
+`Integridad` to 1% is safe on its own, independent of the suit issue
+above. Result pending.
