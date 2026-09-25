@@ -899,12 +899,10 @@ downstream state — camera/room setup depends on it completing — in an
 unknown condition), versus the handful of unrelated, separately-logged,
 non-fatal rendering errors described below.
 
-**Fix, applied and re-sent as a corrected test (unconfirmed pending
-re-test):** remove the object's `<objetos>` entry entirely when marking a
-suit as worn (mirroring the real save's own representation), rather than
-just setting the two `JUGADOR` flags and leaving the object in place. If
-a future "make the player wear a suit" cheat is added to NSM, it must
-perform both steps together.
+**Fix confirmed (re-tested in-game, no crash) and implemented in NSM:**
+`SaveMemoryManager.wear_hazmat_suit(suit_number=None)` sets both
+`JUGADOR` flags and removes the object's `<objetos>` entry in the same
+call, wired up as a "Put On Hazmat Suit" button on the Player Stats tab.
 
 ### Separate, lower-severity finding from the same crashed session: `TexturaQuemada.SetDestruido` can throw when an object is force-damaged
 The same `Player.log` also showed 6 occurrences (2 distinct objects,
