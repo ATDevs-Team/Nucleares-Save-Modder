@@ -20,7 +20,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import xml.etree.ElementTree as ET
 import os
 
-from nucleares_io import read_save_file, write_save_file
+from nucleares_io import read_save_file, write_save_file, ensure_stats_db
 from nucleares_state import SaveMemoryManager
 
 class ModderApp:
@@ -28,9 +28,10 @@ class ModderApp:
         self.root = root
         self.root.title("Nucleares Save Modder (Multi-Module)")
         self.root.geometry("800x680")
-        
+
         self.memory = None
         self.manual_map = {}
+        self.source_filepath = None   # path last loaded from, used to carry over the .sqlite companion on save
 
         self.create_widgets()
 
@@ -137,14 +138,19 @@ class ModderApp:
         try:
             tree, root = read_save_file(filepath)
             self.memory = SaveMemoryManager(tree, root)
+            self.source_filepath = filepath
             self.lbl_file.config(text=os.path.basename(filepath), fg="blue")
             self.btn_save.config(state="normal")
-            
+
             # Populate UI
             self.manual_map = self.memory.get_manual_map()
             self.combo_nodes['values'] = sorted(list(self.manual_map.keys()))
             self.text_manual.delete("1.0", tk.END)
             self.log(f"Successfully mapped {len(self.manual_map)} sub-systems into memory.")
+            if self.memory.state["switches"]:
+                self.log(f"Also found {len(self.memory.state['switches'])} switch/lever objects (not yet in the manual editor).")
+            for warning in self.memory.parse_warnings:
+                self.log(f"WARNING: {warning}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file:\n{e}")
 
@@ -155,7 +161,14 @@ class ModderApp:
             try:
                 self.memory.commit_to_xml()
                 write_save_file(self.memory.master_tree, save_path)
+                # The game logs a (non-fatal, non-self-healing) SQLite error on
+                # every future load if this file's companion .sqlite is missing
+                # or lacks the Estadisticas table -- confirmed against a real
+                # Player.log. Carry the source save's stats database over, or
+                # create a fresh empty one if there isn't a usable one to copy.
+                db_action = ensure_stats_db(self.source_filepath, save_path)
                 self.log(f"Success! Modded file saved to: {save_path}")
+                self.log(f"Companion statistics database {db_action}.")
                 messagebox.showinfo("Success", "File exported successfully!")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save file:\n{e}")
