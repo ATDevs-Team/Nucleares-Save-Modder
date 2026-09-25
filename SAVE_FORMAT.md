@@ -1,4 +1,4 @@
-# Nucleares Save File Format — Reverse-Engineering Notes
+# Nucleares Save File Format
 
 This document records everything discovered about the structure of
 `savegame_025_*.xml` files (save format `<version>25</version>`, i.e.
