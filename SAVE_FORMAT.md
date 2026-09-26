@@ -391,7 +391,9 @@ of upgrade/modifier tags — `AUMENTO_POTENCIA`, `AUMENTO_RESISTENCIA`,
 | `SteamGenerator` | Steam generator equipment object (object form mirroring `EVAPORADOR`) | `Clase`, `Elemento`, construction fields |
 | `PalancaMecanica` id `PalancaSCRAM0`-`PalancaSCRAM8` | **The physical SCRAM lever, one per control-rod bank** (type-C: `field[last]_literal` is `True`/`False` — pulled/not pulled) | Confirmed via real Player.log (§10) to exist separately from `CONTROL_NEW_CORE/_bancos/_scramSolicitado`. Setting both to `True`/`true` together IS read by the reactor's control logic on load (confirmed: logs "solicitud de scram" per bank + disables each bank's rod-drive motor + releases the mechanical brakes), but this alone did not complete an actual rod drop over ~8 real minutes of simulation — the trigger mechanism isn't fully reproduced yet, see §10 round 2/3. |
 | `PalancaMecanica` id `PalancaMecanica_Frenos` | **The mechanical brake lever/status for the control-rod drive train** (type-C, `True` = brakes released) | Confirmed via real Player.log: releases in lockstep with a SCRAM request (`Liberando frenos en tren`). Other `PalancaMecanica` instances are ordinary valve-selector/bypass levers (`_SELECTOR_*`, `_BYPASS`) unrelated to SCRAM. |
-| `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `InterruptorTecla`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
+| `InterruptorTecla` id `Interruptor_BDC_Banco<N>` (1-9) + master `Interruptor_BDC_Banco_TODOS` | **The physical power switch for each control-rod bank's drive motor** ("BDC" = Barras De Control), type-C `True`/`False` | Per a community bug-report thread, a SCRAM request "manually deactivates" these (matches the `El motor N fue desactivado manualmente` log line from §10 round 2) and that state persists through the scram attempt, blocking the drop — flipping them back to `True` is the reported fix. In every real save inspected they sit mostly `False` with only one bank `True` at a time during normal operation, so `False` alone isn't itself a fault condition. Round-4 test pending (§10). |
+| `MotorBDC` (ids `HRCP0`-`HRCP8`, one per bank) | **The control-rod drive motor itself** (type-B, has an XML payload) | `Integridad`, `IsEncendido` (likely the backend flag `Interruptor_BDC_Banco<N>` drives — always `false` in every real save inspected, consistent with motors idling when no rod movement is in progress), `_fluidoHidraulico` (hydraulic fluid level), `_watts`. |
+| `Bateria`, `TrajeProtector`, `Fusible`, `Bidon`, `RepuestoMotorInterno`, `RepuestoResistor`, `CajaElectrodos`, `CajaInterruptores`, `ContenedorTrajeProtector`, `InterruptorPalanca`, `Persiana`, `PuertasConAnimacion`, `Selector`, `TecladoNumerico`, `GameObject`, `controlTriggerEventosPorZona` | Batteries, radiation suits, fuses, fuel cans, spare parts, switch/lever/keypad props, generic scenery, event triggers | No XML payload observed in these 7 saves (type A/C — either pure scene props or simple pipe-literal toggles, see §3 shapes A/C) |
 
 This confirms **every functional piece of plant equipment** (pumps,
 turbines, generators, resistors, transformers, valves, cranes, control-rod
@@ -843,23 +845,44 @@ additional companion state (a timer, an edge-trigger flag, something
 `_scramSolicitado` that was `false` in every observed save — might gate)
 that a save edit touching only `_scramSolicitado` doesn't reproduce.
 
-### Round 3 result: closed — this is a genuine in-game bug, not an NSM/save-editing problem
-Before running the planned "diff a real manual pull" experiment, the
-maintainer tested the control path directly in-game on their own: **the
+### Round 3 result: physical lever also failed — but this turned out to be a known, worked-around community bug, not a dead end
+The maintainer tested the control path directly in-game on their own: the
 physical SCRAM lever/button did nothing even when pressed repeatedly by
-hand**, no save editing involved. That rules out every hypothesis above
-about `_directo` or some other companion field a save edit failed to set —
-there's no companion field to find, because the game's own control-rod
-drop mechanic doesn't complete for either input path in
-**V2.2.25.221**. This matches `tested_versions.md`'s existing note that
-this version's `NUCLEO`/`CONTROL_NEW_CORE` reactor model is only
-partially working — SCRAM is now a confirmed instance of that, not a gap
-in NSM's understanding of the save format. `_scramSolicitado` and the
-`PalancaSCRAM<N>`/`PalancaMecanica_Frenos` objects documented above are
-still believed correct as *the* mechanism (the log evidence in round 2
-shows the game's own code reads and acts on them) — they just don't
-finish executing in this game build. No further SCRAM experiments planned
-unless a future Nucleares patch changes this.
+hand, no save editing involved. At the time this was read as "the game's
+control-rod drop mechanic doesn't complete in V2.2.25.221, full stop." It
+doesn't — **reopened** after the maintainer found a bug-reports thread
+("SCRAM doesn't complete") where another player explains the actual
+mechanism:
+
+> *"The message 'El motor n fue desactivado manualmente: True' / 'Motor n
+> was manually deactivated: True' means that the motors controlling the
+> control rods were manually deactivated, a state that persists even
+> during a scram. To reactivate the motors, you must return to the room
+> beneath the core where the control rod motors are located and flip the
+> levers back to the 'ON' position."*
+
+That log line is exactly what round 2's `Player.log` showed (§10 above) —
+we had the evidence and hadn't connected it to a fix. The physical
+switches this refers to are `Interruptor_BDC_Banco<N>` (an `InterruptorTecla`
+object per bank, plus a master `Interruptor_BDC_Banco_TODOS`) — previously
+only lumped into §3.2's generic `InterruptorTecla` catch-all row, now
+broken out below. In every real save inspected these sit mostly
+`False` with only one bank `True` (e.g. save `00064`: only `Banco5`), which
+looks like a normal idle resting state, not damage — so the working theory
+is that setting `_scramSolicitado=true` (or requesting a SCRAM at all)
+itself flips these to a "manually deactivated" state as a side effect,
+and — per the bug report — that state then blocks the drop from
+completing unless flipped back to `True`/on.
+
+### Round 4 (in progress): SCRAM request + levers + BDC bank switches + MotorBDC power flag
+`savegame_025_00096.xml` extends round 2's edit with the community fix:
+all 9 `Interruptor_BDC_Banco<N>` switches and the master
+`Interruptor_BDC_Banco_TODOS` set to `True`, plus every `MotorBDC` object's
+`IsEncendido` set to `true` (the likely backend flag those physical
+switches drive). Sent to the maintainer with the same request as round 2
+— let it run un-paused for a few in-game minutes before saving. Result
+pending; update this section (and un-retract the "confirmed in-game bug"
+framing in the implications list below) once it comes back either way.
 
 ---
 ## 11. Confirmed hazard: representing a worn hazmat suit by editing `<objetos>` state alone crashes/hangs the game
